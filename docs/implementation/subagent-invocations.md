@@ -51,6 +51,7 @@ Read these docs first:
 - docs/zpkg-mvp-architecture.md
 - docs/zpkg-implementation-plan.md
 - docs/implementation/README.md
+- docs/implementation/review-process.md
 - the relevant phase file under docs/implementation/
 - and, when applicable:
   - docs/zpkg-schema.md
@@ -75,6 +76,34 @@ Requirements:
 
 ---
 
+## Standard reviewer invocation template
+
+Use this after every developer lane completes.
+
+```json
+{
+  "description": "Review completed lane",
+  "subagent_type": "general-purpose",
+  "thinking": "medium",
+  "max_turns": 8,
+  "run_in_background": true,
+  "isolation": "worktree",
+  "prompt": "You are reviewing a completed implementation lane. Read docs/zpkg-mvp-architecture.md, docs/zpkg-implementation-plan.md, docs/implementation/README.md, docs/implementation/review-process.md, the specific docs/implementation/phase-XX-...md file for the lane, and any relevant schema docs first. Review the implementation against the phase task definition, the architecture and schema docs, the lane prompt, and general code quality and maintainability expectations. Do not make code changes. Return: 1. Required findings that must be fixed before approval, 2. Optional improvements that should be reported to the Manager for possible follow-up tasks, 3. A final verdict: approve or changes required."
+}
+```
+
+### Review loop rule
+
+For every developer lane:
+
+1. launch the developer lane
+2. when it finishes, launch a clean reviewer subagent
+3. if the reviewer returns required findings, resume the developer lane and fix them
+4. re-run review until the reviewer approves
+5. only then merge and advance dependent waves
+
+---
+
 ## Wave 0 - Bootstrap
 
 Launch this first, alone.
@@ -93,13 +122,20 @@ Launch this first, alone.
 }
 ```
 
-### Merge gate before next wave
+### Review and merge gate before next wave
+
+After `bootstrap-lane` completes, launch a clean reviewer subagent using the standard reviewer template.
+If required findings are returned:
+- resume `bootstrap-lane`
+- fix the findings
+- re-run review until approved
 
 Do not launch later waves until:
 
 - root `zig build` works
 - root `zig build test` works
 - root CLI help works
+- reviewer approval exists for `bootstrap-lane`
 
 ---
 
@@ -135,12 +171,16 @@ Launch these after `bootstrap-lane` is merged.
 }
 ```
 
-### Merge gate before next wave
+### Review and merge gate before next wave
+
+Review both `example-fixtures-lane` and `schema-core-lane` with clean reviewer subagents.
+Required findings go back to the original lane. Optional improvements go to the Manager backlog.
 
 Wait for:
 
 - core scalar/domain types to merge
 - example package roots to exist
+- reviewer approval for both lanes
 
 ---
 
@@ -176,13 +216,17 @@ Launch these two in parallel after `schema-core-lane` merges.
 }
 ```
 
-### Merge gate before next wave
+### Review and merge gate before next wave
+
+Review both schema lanes with clean reviewer subagents.
+Fix required findings in the original lane and re-review before merge.
 
 Wait for:
 
 - `zpkg.zon` parser merged
 - `lockfile`, `graph`, and `manifest` parsers merged
 - schema tests passing
+- reviewer approval for both lanes
 
 ---
 
@@ -218,13 +262,17 @@ Launch these after Wave 2 merges.
 }
 ```
 
-### Merge gate before next wave
+### Review and merge gate before next wave
+
+Review `hashing-lane` and `resolver-lane` independently.
+Required findings go back to the corresponding lane.
 
 Wait for:
 
 - identity/hash APIs merged
 - exact resolver and lockfile gating merged
 - `lock` / `update` basic flow working
+- reviewer approval for both lanes
 
 ---
 
@@ -274,13 +322,17 @@ Launch these in parallel after `resolver-lane` merges.
 }
 ```
 
-### Merge gate before next wave
+### Review and merge gate before next wave
+
+Review `store-lane`, `wrapper-lane`, and `cli-inspect-graph-lane` independently.
+Optional improvements should not block merge unless they reveal a correctness or spec issue.
 
 Wait for:
 
 - store APIs merged
 - `zpkg-build` wrappers and `zpkg.graph.zon` emission merged
 - examples migrated enough to emit graphs
+- reviewer approval for all required predecessor lanes
 
 ---
 
@@ -302,12 +354,16 @@ Launch after store + wrapper lanes merge.
 }
 ```
 
-### Merge gate before next wave
+### Review and merge gate before next wave
+
+Review `realization-lane` with a clean reviewer subagent.
+If required findings are returned, resume the same lane and re-review.
 
 Wait for:
 
 - `realize` works on at least the example graph
 - source and binary package materialization are both implemented
+- reviewer approval for `realization-lane`
 
 ---
 
@@ -329,13 +385,17 @@ Launch after realization lane merges.
 }
 ```
 
-### Merge gate before next wave
+### Review and merge gate before next wave
+
+Review `build-pipeline-lane` with a clean reviewer subagent.
+Reviewer should pay special attention to architecture compliance, domain handling, store reuse behavior, and adequacy of integration tests.
 
 Wait for:
 
 - cold-store build works
 - warm-store build reuses artifacts
 - test mode behavior works as specified
+- reviewer approval for `build-pipeline-lane`
 
 ---
 
@@ -387,6 +447,15 @@ Launch these in parallel once the build pipeline is mostly green.
 
 ---
 
+### Final review gate
+
+Review `export-lane`, `ux-diagnostics-lane`, and `repro-ci-lane` independently with clean reviewer subagents.
+
+Required findings must be sent back to the original developer lane for correction.
+Optional improvements should be recorded by the Manager as follow-up tasks.
+
+Do not mark the implementation complete until all late-wave lanes have reviewer approval.
+
 ## Practical first launch set
 
 If you want the smallest useful initial kickoff, launch in this order:
@@ -407,6 +476,8 @@ If you want the smallest useful initial kickoff, launch in this order:
    - `cli-inspect-graph-lane`
 
 That is the best stopping point before the big realization/build convergence work.
+
+Remember: every lane merge should happen only after reviewer approval.
 
 ---
 

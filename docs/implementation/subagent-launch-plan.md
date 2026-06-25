@@ -28,6 +28,8 @@ For long-running follow-up within the same lane, keep a stable lane/session iden
 
 This reduces cross-lane file conflicts and makes it easier to resume work.
 
+Every coding lane must be followed by a clean review lane before merge.
+
 ---
 
 ## Global instructions for all coding subagents
@@ -54,6 +56,28 @@ Use these in every coding prompt:
    - files changed
    - tests/commands run
    - open issues / follow-up suggestions
+
+## Review requirement
+
+After every developer lane completes, launch a clean reviewer subagent.
+
+Reviewer must compare the implementation against:
+
+- `docs/zpkg-mvp-architecture.md`
+- `docs/zpkg-implementation-plan.md`
+- the relevant `docs/implementation/phase-XX-...md`
+- the relevant schema docs
+- the lane/task prompt
+- general code quality and maintainability expectations
+
+Reviewer output must separate:
+
+- **Required findings**
+  - must be fixed by the developer lane before approval
+- **Optional improvements**
+  - report to the Manager as possible follow-up tasks
+
+A lane is not complete until the reviewer approves it after any required fixes.
 
 ---
 
@@ -204,6 +228,16 @@ Report back with:
 
 ---
 
+## Wave 0 review gate
+
+After `bootstrap-lane` finishes:
+
+1. launch a clean reviewer subagent
+2. if it returns required findings, resume `bootstrap-lane` to fix them
+3. re-run review until approved
+
+No later wave should start until the bootstrap lane has reviewer approval.
+
 ## Wave 1 - Foundation split
 
 Launch after Wave 0 merges.
@@ -281,6 +315,16 @@ Report back with:
 - any API surfaces schema parsers should depend on
 
 ---
+
+## Wave 1 review gate
+
+After `example-fixtures-lane` and `schema-core-lane` finish:
+
+- review each lane independently with a clean reviewer subagent
+- send required findings back to the corresponding developer lane
+- treat optional improvements as Manager follow-up candidates
+
+Do not start Wave 2 until both lanes have reviewer approval.
 
 ## Wave 2 - Schema layer
 
@@ -360,6 +404,16 @@ Report back with:
 
 ---
 
+## Wave 2 review gate
+
+After `package-schema-lane` and `lock-graph-schema-lane` finish:
+
+- review each lane independently
+- fix required findings in the original lane
+- re-review before merge
+
+Do not start Wave 3 until both schema lanes have reviewer approval.
+
 ## Wave 3 - Hashing and resolution spine
 
 Launch after Wave 2 merges.
@@ -426,6 +480,16 @@ Report back with:
 - any remaining integration dependency on hashing lane
 
 ---
+
+## Wave 3 review gate
+
+After `hashing-lane` and `resolver-lane` finish:
+
+- review each lane independently
+- send required findings back to the original lane
+- re-review until approval
+
+Do not start Wave 4 until both lanes have reviewer approval.
 
 ## Wave 4 - Main parallel window
 
@@ -528,6 +592,16 @@ Report back with:
 
 ---
 
+## Wave 4 review gate
+
+After `store-lane`, `wrapper-lane`, and `cli-inspect-graph-lane` finish:
+
+- review each lane independently
+- keep optional improvements separate from required findings
+- merge only after approval
+
+Do not start Wave 5 until the required predecessor lanes have reviewer approval.
+
 ## Wave 5 - Re-convergence on realization
 
 Launch after store and wrapper lanes merge.
@@ -563,6 +637,16 @@ Report back with:
 - remaining prerequisites for full build fallback
 
 ---
+
+## Wave 5 review gate
+
+After `realization-lane` finishes:
+
+- launch a clean reviewer subagent
+- fix required findings in `realization-lane`
+- re-review until approved
+
+Do not start Wave 6 until realization has reviewer approval.
 
 ## Wave 6 - End-to-end build/test pipeline
 
@@ -603,6 +687,20 @@ Report back with:
 - any remaining adapter/store issues uncovered
 
 ---
+
+## Wave 6 review gate
+
+After `build-pipeline-lane` finishes:
+
+- launch a clean reviewer subagent
+- the reviewer should pay special attention to:
+  - architecture compliance
+  - domain handling
+  - cache/store reuse behavior
+  - adequacy of integration tests
+- fix required findings and re-review until approved
+
+Do not start Wave 7 until the build pipeline lane has reviewer approval.
 
 ## Wave 7 - Late parallel window
 
@@ -696,6 +794,16 @@ Report back with:
 
 ---
 
+## Wave 7 review gate
+
+After `export-lane`, `ux-diagnostics-lane`, and `repro-ci-lane` finish:
+
+- review each lane independently
+- required findings go back to the original lane
+- optional improvements go to the Manager backlog
+
+Final completion requires reviewer approval for all late-wave lanes.
+
 ## Minimal launch set if you want fewer agents
 
 If you want a smaller initial batch, use this reduced sequence:
@@ -746,3 +854,5 @@ If launching immediately, I recommend this exact order:
    - `repro-ci-lane`
 
 This gives the best balance between throughput and merge risk.
+
+In all cases, treat a lane as merged/complete only after reviewer approval.

@@ -45,6 +45,7 @@ The MVP target remains:
 6. **Treat `zpkg.zon` as dependency constraints and `zpkg.lock.zon` as exact resolution.**
 7. **Use mandatory `zpkg-build` wrappers for all first-party packages.**
 8. **Validate declared package contract vs registered target graph strictly.**
+9. **Require a clean review subagent after each implementation lane or phase.**
 
 ---
 
@@ -683,6 +684,7 @@ The MVP is complete when all of the following are true:
 8. An authoritative lockfile exists with exact chosen versions, source identities, domains, and selected options.
 9. `zpkg export` can produce a relocatable target-domain closure.
 10. The workflow is documented well enough for another engineer to reproduce it locally.
+11. Each phase/lane has been reviewed by a clean reviewer subagent, with required findings fixed and approval recorded.
 
 ---
 

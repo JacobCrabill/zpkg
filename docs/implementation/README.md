@@ -13,6 +13,7 @@ Primary design inputs:
 - `docs/zpkg-schema.md`
 - `docs/zpkg-lockfile.md`
 - `docs/zpkg-graph-schema.md`
+- `docs/implementation/review-process.md`
 
 ## Execution model
 
@@ -95,6 +96,22 @@ P07 + P08 + P09 -> P10 Repro/CI
 ### Lane H - Reproducibility and CI
 - `phase-10-reproducibility-and-ci.md`
 
+## Review loop
+
+Every lane must go through the review process described in:
+
+- `review-process.md`
+
+Minimum rule set:
+
+1. a developer subagent completes the lane
+2. a clean reviewer subagent reviews it against the architecture, schema docs, implementation plan, and lane definition
+3. required findings go back to the developer lane for correction
+4. optional out-of-scope improvements go back to the Manager as follow-up candidates
+5. the reviewer re-checks and approves before merge
+
+No dependent wave should start from an unreviewed lane output.
+
 ## Working rules for subagents
 
 1. Do not change architectural commitments from the root docs without explicit coordination.
@@ -120,4 +137,5 @@ P07 + P08 + P09 -> P10 Repro/CI
 - `phase-08-cli-and-ux.md`
 - `phase-09-export-and-relocation.md`
 - `phase-10-reproducibility-and-ci.md`
+- `review-process.md`
 - `subagent-launch-plan.md`
