@@ -1,0 +1,36 @@
+.{
+    .schema = 1,
+
+    .root = .{
+        .package = "zpkg.example.hello_app",
+        .version = "0.1.0.0",
+    },
+
+    .generated_by = .{
+        .zpkg_version = "0.1.0",
+        .zig_version = "0.16.0",
+    },
+
+    .instances = .{
+        .@"zpkg.example.hello_app#target" = .{
+            .package = "zpkg.example.hello_app",
+            .domain = .target,
+            .version = "0.1.0.0",
+            .source_hash = "root-hash",
+            .selected_options = .{
+                .shared = true,
+            },
+            .deps = .{
+                .hello_lib = "zpkg.example.hello_lib#target",
+            },
+        },
+        .@"zpkg.example.hello_lib#target" = .{
+            .package = "zpkg.example.hello_lib",
+            .domain = .target,
+            .version = "0.1.0.0",
+            .source_hash = "lib-hash",
+            .selected_options = .{},
+            .deps = .{},
+        },
+    },
+}

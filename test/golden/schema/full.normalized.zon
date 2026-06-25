@@ -1,0 +1,64 @@
+.{
+    .schema = 1,
+
+    .package = .{
+        .name = "tracker",
+        .id = "sai.pilot.object_tracker",
+        .version = "1.2.3.0",
+        .backend = .zig,
+    },
+
+    .options = .{
+        .api_level = .{
+            .kind = .int,
+            .default = 2,
+            .abi = true,
+        },
+        .flavor = .{
+            .kind = .string,
+            .default = "default",
+            .abi = false,
+        },
+        .shared = .{
+            .kind = .bool,
+            .default = true,
+            .abi = true,
+        },
+    },
+
+    .deps = .{
+        .gtest = .{
+            .package = "sai.upstream.gtest",
+            .require = .{ .version = "=1.14.0.0" },
+            .when = .{
+                .domain = .host,
+                .options = .{
+                    .flavor = "default",
+                },
+            },
+        },
+        .protobuf = .{
+            .package = "sai.upstream.protobuf",
+            .require = .{ .version = "=4.1.2.0" },
+        },
+    },
+
+    .targets = .{
+        .tracker = .{
+            .kind = .library,
+            .linkage = .default,
+        },
+        .tracker_headers = .{
+            .kind = .headers,
+        },
+        .tracker_tests = .{
+            .kind = .executable,
+            .test_only = true,
+            .when = .{
+                .options = .{
+                    .flavor = "default",
+                },
+            },
+        },
+    },
+}

@@ -1,0 +1,31 @@
+.{
+    .schema = 1,
+
+    .package = .{
+        .name = "hello-lib",
+        .id = "zpkg.example.hello_lib",
+        .version = "0.1.0.0",
+        .backend = .zig,
+    },
+
+    .options = .{
+        .shared = .{
+            .kind = .bool,
+            .default = true,
+            .abi = true,
+        },
+    },
+
+    .targets = .{
+        .hello = .{
+            .kind = .library,
+            .linkage = .default,
+        },
+        .hello_assets = .{
+            .kind = .resource_set,
+        },
+        .hello_headers = .{
+            .kind = .headers,
+        },
+    },
+}

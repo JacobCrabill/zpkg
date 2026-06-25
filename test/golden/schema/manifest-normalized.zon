@@ -1,0 +1,24 @@
+.{
+    .schema = 1,
+    .name = "hello-lib",
+    .package_id = "zpkg.example.hello_lib",
+    .package_version = "0.1.0.0",
+    .domain = .target,
+    .source_hash = "source-hash",
+    .instance_key = "instance-key",
+    .target = "x86_64-linux-gnu",
+    .optimize = "ReleaseFast",
+    .linkage = .shared,
+    .selected_options = .{
+        .build_tests = false,
+        .shared = true,
+    },
+    .exported_targets = .{
+        "hello",
+        "hello_headers",
+    },
+    .deps = .{
+        .@"zpkg.example.protobuf" = "protobuf-instance",
+        .@"zpkg.example.zlib" = "zlib-instance",
+    },
+}

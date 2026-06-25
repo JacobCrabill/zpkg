@@ -27,6 +27,24 @@ pub const PackageId = struct {
         if (segment_count < 2) return error.MissingNamespace;
     }
 
+    pub fn adoptOwned(text: []const u8) !PackageId {
+        try validate(text);
+        return .{ .text = text };
+    }
+
+    pub fn parseOwned(allocator: std.mem.Allocator, text: []const u8) !PackageId {
+        try validate(text);
+        return .{ .text = try allocator.dupe(u8, text) };
+    }
+
+    pub fn cloneOwned(self: PackageId, allocator: std.mem.Allocator) !PackageId {
+        return .{ .text = try allocator.dupe(u8, self.text) };
+    }
+
+    pub fn deinitOwned(self: PackageId, allocator: std.mem.Allocator) void {
+        allocator.free(self.text);
+    }
+
     pub fn eql(self: PackageId, other: PackageId) bool {
         return std.mem.eql(u8, self.text, other.text);
     }

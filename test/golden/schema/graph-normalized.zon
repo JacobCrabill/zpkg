@@ -1,0 +1,80 @@
+.{
+    .schema = 1,
+
+    .package = .{
+        .name = "hello-lib",
+        .id = "zpkg.example.hello_lib",
+        .version = "0.1.0.0",
+        .domain = .target,
+    },
+
+    .selected_options = .{
+        .build_tests = false,
+        .shared = true,
+    },
+
+    .dependency_aliases = .{
+        .protobuf = .{
+            .package = "zpkg.example.protobuf",
+            .domain = .target,
+        },
+        .protoc = .{
+            .package = "zpkg.example.protobuf",
+            .domain = .host,
+        },
+    },
+
+    .targets = .{
+        .assets = .{
+            .kind = .resource_set,
+            .exported = true,
+            .test_only = false,
+            .include_dirs = .{},
+            .compile_definitions = .{},
+            .system_libs = .{},
+            .artifacts = .{},
+            .deps = .{},
+            .installs = .{
+                .{ .source = "models/default.bin", .dir = .share, .subdir = "hello/assets", .dest = "default.bin" },
+            },
+        },
+        .build_helpers = .{
+            .kind = .zig_module,
+            .exported = true,
+            .test_only = false,
+            .include_dirs = .{},
+            .compile_definitions = .{},
+            .system_libs = .{},
+            .artifacts = .{},
+            .deps = .{},
+            .module = .{
+                .name = "build_helpers",
+                .root_source_file = "src/build_helpers.zig",
+            },
+        },
+        .hello = .{
+            .kind = .library,
+            .linkage = .shared,
+            .exported = true,
+            .test_only = false,
+            .include_dirs = .{
+                .{ .path = "include", .visibility = .public },
+                .{ .path = "src", .visibility = .private },
+            },
+            .compile_definitions = .{
+                .{ .key = "API_LEVEL", .value = 2, .visibility = .private },
+                .{ .key = "USE_SSL", .value = true, .visibility = .public },
+            },
+            .system_libs = .{
+                .{ .name = "pthread", .visibility = .public },
+            },
+            .artifacts = .{
+                .{ .kind = .library, .path = "lib/libhello.so" },
+            },
+            .deps = .{
+                .codegen = .{ .dep = "protoc", .target = "protoc", .role = .tool, .visibility = .private },
+                .protobuf_runtime = .{ .dep = "protobuf", .target = "protobuf", .role = .link, .visibility = .public },
+            },
+        },
+    },
+}
