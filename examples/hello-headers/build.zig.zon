@@ -1,0 +1,13 @@
+.{
+    .name = .hello_headers,
+    .version = "0.1.0",
+    .fingerprint = 0xa51bbf2570b6c484,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "zpkg.zon",
+        "include",
+    },
+}

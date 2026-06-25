@@ -1,0 +1,16 @@
+.{
+    .schema = 1,
+
+    .package = .{
+        .name = "hello-headers",
+        .id = "zpkg.example.hello_headers",
+        .version = "0.1.0.0",
+        .backend = .zig,
+    },
+
+    .targets = .{
+        .hello_headers = .{
+            .kind = .headers,
+        },
+    },
+}
