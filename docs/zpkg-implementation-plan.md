@@ -4,6 +4,21 @@
 
 This document breaks the `zpkg` MVP into logical implementation phases with explicit exit criteria.
 
+Detailed per-phase breakdowns suitable for parallel subagents live under:
+
+- `docs/implementation/README.md`
+- `docs/implementation/phase-00-bootstrap.md`
+- `docs/implementation/phase-01-schema-and-model.md`
+- `docs/implementation/phase-02-hashing-and-identity.md`
+- `docs/implementation/phase-03-resolution-and-lockfile.md`
+- `docs/implementation/phase-04-store-and-manifest.md`
+- `docs/implementation/phase-05-zpkg-build-and-graph.md`
+- `docs/implementation/phase-06-workspace-realization.md`
+- `docs/implementation/phase-07-build-fallback.md`
+- `docs/implementation/phase-08-cli-and-ux.md`
+- `docs/implementation/phase-09-export-and-relocation.md`
+- `docs/implementation/phase-10-reproducibility-and-ci.md`
+
 It assumes the architecture described in:
 
 - `docs/zpkg-mvp-architecture.md`
