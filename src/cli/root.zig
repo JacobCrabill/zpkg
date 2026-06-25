@@ -1,17 +1,18 @@
 const std = @import("std");
+const inspect = @import("inspect.zig");
 const workspace = @import("../util/workspace.zig");
 
 pub const help_text =
     \\zpkg - Zig package workspace realizer
     \\
-    \\Bootstrap status: Phase 00 scaffold only.
+    \\Bootstrap status: package schema inspect implemented; other commands remain placeholders.
     \\
     \\Usage:
     \\  zpkg [command]
     \\  zpkg --help
     \\
     \\Commands:
-    \\  inspect   Inspect package metadata (placeholder)
+    \\  inspect   Inspect package metadata from <pkg-root>/zpkg.zon
     \\  graph     Show resolved package graph (placeholder)
     \\  lock      Create an authoritative lockfile (placeholder)
     \\  update    Update the authoritative lockfile (placeholder)
@@ -28,6 +29,11 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     if (shouldShowHelp(args) or args.len == 1) {
         return writeHelp(io);
     }
+
+    if (std.mem.eql(u8, args[1], "inspect")) {
+        return inspect.run(args, io);
+    }
+
     return writeUnknownCommand(io, args[1]);
 }
 

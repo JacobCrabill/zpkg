@@ -5,6 +5,7 @@ const zon_util = @import("../schema/zon_util.zig");
 
 pub const Dependency = struct {
     package_id: model.PackageId,
+    domain: model.Domain,
     instance_key: []const u8,
 
     pub fn deinit(self: Dependency, allocator: std.mem.Allocator) void {
@@ -133,8 +134,11 @@ pub const Manifest = struct {
         } else {
             try writer.writeAll("\n");
             for (sorted_deps) |entry| {
+                const dep_identity = try std.fmt.allocPrint(allocator, "{s}#{s}", .{ entry.package_id.asText(), entry.domain.asText() });
+                defer allocator.free(dep_identity);
+
                 try zon_util.writeIndent(writer, 2);
-                try zon_util.writeQuotedFieldName(writer, entry.package_id.asText());
+                try zon_util.writeQuotedFieldName(writer, dep_identity);
                 try writer.writeAll(" = ");
                 try zon_util.writeString(writer, entry.instance_key);
                 try writer.writeAll(",\n");
@@ -171,7 +175,9 @@ fn namedOptionValueLessThan(a: model.NamedOptionValue, b: model.NamedOptionValue
 }
 
 fn dependencyLessThan(a: Dependency, b: Dependency) bool {
-    return std.mem.order(u8, a.package_id.asText(), b.package_id.asText()) == .lt;
+    const package_order = std.mem.order(u8, a.package_id.asText(), b.package_id.asText());
+    if (package_order != .eq) return package_order == .lt;
+    return @intFromEnum(a.domain) < @intFromEnum(b.domain);
 }
 
 fn stringLessThan(a: []const u8, b: []const u8) bool {

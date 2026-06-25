@@ -4,7 +4,7 @@ const graph_model = @import("../model/graph.zig");
 const manifest_model = @import("../model/manifest.zig");
 const zon_util = @import("zon_util.zig");
 
-pub const ParseError = zon_util.ParseError || error{OutOfMemory};
+pub const ParseError = zon_util.ParseError || error{ OutOfMemory, InvalidDependencyIdentity };
 
 pub fn parseSourceAlloc(allocator: std.mem.Allocator, source: [:0]const u8) ParseError!manifest_model.Manifest {
     var doc = try zon_util.parseDocument(allocator, source);
@@ -36,11 +36,13 @@ fn parseDocumentAlloc(allocator: std.mem.Allocator, doc: *const zon_util.Documen
     const name = try zon_util.parseNonEmptyStringAlloc(allocator, doc, try object.require("name"));
     errdefer allocator.free(name);
     const package_id_text = try zon_util.parseNonEmptyStringAlloc(allocator, doc, try object.require("package_id"));
-    errdefer allocator.free(package_id_text);
     const package_version_text = try zon_util.parseNonEmptyStringAlloc(allocator, doc, try object.require("package_version"));
     defer allocator.free(package_version_text);
 
-    const package_id = model.PackageId.adoptOwned(package_id_text) catch return error.InvalidPackageId;
+    const package_id = model.PackageId.adoptOwned(package_id_text) catch {
+        allocator.free(package_id_text);
+        return error.InvalidPackageId;
+    };
     errdefer package_id.deinitOwned(allocator);
     const package_version = model.Version.parse(package_version_text) catch return error.InvalidVersion;
     const domain = zon_util.parseEnum(model.Domain, doc, try object.require("domain")) catch return error.InvalidDomain;
@@ -143,18 +145,33 @@ fn parseDepsAlloc(allocator: std.mem.Allocator, doc: *const zon_util.Document, n
     }
 
     for (0..object.fieldCount()) |index| {
-        const key_text = object.fieldName(index);
-        const package_id = model.PackageId.parseOwned(allocator, key_text) catch return error.InvalidPackageId;
-        errdefer package_id.deinitOwned(allocator);
+        const identity = try parseDependencyIdentityOwned(allocator, object.fieldName(index));
+        errdefer identity.package_id.deinitOwned(allocator);
         const instance_key = try zon_util.parseNonEmptyStringAlloc(allocator, doc, object.fieldNode(index));
         result[index] = .{
-            .package_id = package_id,
+            .package_id = identity.package_id,
+            .domain = identity.domain,
             .instance_key = instance_key,
         };
         initialized += 1;
     }
 
     return result;
+}
+
+fn parseDependencyIdentityOwned(allocator: std.mem.Allocator, text: []const u8) ParseError!struct {
+    package_id: model.PackageId,
+    domain: model.Domain,
+} {
+    const hash_index = std.mem.lastIndexOfScalar(u8, text, '#') orelse return error.InvalidDependencyIdentity;
+    const package_text = text[0..hash_index];
+    const domain_text = text[hash_index + 1 ..];
+    if (package_text.len == 0 or domain_text.len == 0) return error.InvalidDependencyIdentity;
+
+    return .{
+        .package_id = model.PackageId.parseOwned(allocator, package_text) catch return error.InvalidPackageId,
+        .domain = model.Domain.parse(domain_text) catch return error.InvalidDomain,
+    };
 }
 
 test "parse manifest schema" {
@@ -172,7 +189,10 @@ test "parse manifest schema" {
         \\    .linkage = .shared,
         \\    .selected_options = .{ .shared = true },
         \\    .exported_targets = .{ "hello", "hello_headers" },
-        \\    .deps = .{ .@"zpkg.example.protobuf" = "protobuf-instance" },
+        \\    .deps = .{
+        \\        .@"zpkg.example.protobuf#host" = "protobuf-host-instance",
+        \\        .@"zpkg.example.protobuf#target" = "protobuf-target-instance",
+        \\    },
         \\}
     ;
 
@@ -182,6 +202,48 @@ test "parse manifest schema" {
     try std.testing.expectEqualStrings("hello-lib", parsed.name);
     try std.testing.expectEqual(graph_model.Linkage.shared, parsed.linkage);
     try std.testing.expectEqualStrings("hello", parsed.exported_targets[0]);
+    try std.testing.expectEqual(@as(usize, 2), parsed.deps.len);
+
+    var saw_host = false;
+    var saw_target = false;
+    for (parsed.deps) |dep| {
+        try std.testing.expectEqualStrings("zpkg.example.protobuf", dep.package_id.asText());
+        switch (dep.domain) {
+            .host => {
+                saw_host = true;
+                try std.testing.expectEqualStrings("protobuf-host-instance", dep.instance_key);
+            },
+            .target => {
+                saw_target = true;
+                try std.testing.expectEqualStrings("protobuf-target-instance", dep.instance_key);
+            },
+        }
+    }
+
+    try std.testing.expect(saw_host);
+    try std.testing.expect(saw_target);
+}
+
+test "manifest rejects dependency identity without domain" {
+    const source =
+        \\.{
+        \\    .schema = 1,
+        \\    .name = "hello-lib",
+        \\    .package_id = "zpkg.example.hello_lib",
+        \\    .package_version = "0.1.0",
+        \\    .domain = .target,
+        \\    .source_hash = "source-hash",
+        \\    .instance_key = "instance-key",
+        \\    .target = "x86_64-linux-gnu",
+        \\    .optimize = "ReleaseFast",
+        \\    .linkage = .shared,
+        \\    .selected_options = .{},
+        \\    .exported_targets = .{},
+        \\    .deps = .{ .@"zpkg.example.protobuf" = "protobuf-target-instance" },
+        \\}
+    ;
+
+    try std.testing.expectError(error.InvalidDependencyIdentity, parseSourceAlloc(std.testing.allocator, source));
 }
 
 test "manifest golden normalized zon" {
@@ -200,8 +262,9 @@ test "manifest golden normalized zon" {
         \\    .selected_options = .{ .shared = true, .build_tests = false },
         \\    .exported_targets = .{ "hello", "hello_headers" },
         \\    .deps = .{
-        \\        .@"zpkg.example.protobuf" = "protobuf-instance",
-        \\        .@"zpkg.example.zlib" = "zlib-instance",
+        \\        .@"zpkg.example.zlib#target" = "zlib-instance",
+        \\        .@"zpkg.example.protobuf#target" = "protobuf-target-instance",
+        \\        .@"zpkg.example.protobuf#host" = "protobuf-host-instance",
         \\    },
         \\}
     ;

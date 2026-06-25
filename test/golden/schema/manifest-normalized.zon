@@ -18,7 +18,8 @@
         "hello_headers",
     },
     .deps = .{
-        .@"zpkg.example.protobuf" = "protobuf-instance",
-        .@"zpkg.example.zlib" = "zlib-instance",
+        .@"zpkg.example.protobuf#host" = "protobuf-host-instance",
+        .@"zpkg.example.protobuf#target" = "protobuf-target-instance",
+        .@"zpkg.example.zlib#target" = "zlib-instance",
     },
 }

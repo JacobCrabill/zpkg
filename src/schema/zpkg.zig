@@ -51,6 +51,102 @@ pub const ParseError = error{
     DuplicateField,
 };
 
+pub fn formatDiagnosticAlloc(allocator: std.mem.Allocator, file_path: []const u8, err: ParseError) ![]u8 {
+    if (err == error.OutOfMemory) return error.OutOfMemory;
+    return std.fmt.allocPrint(
+        allocator,
+        "error: invalid zpkg.zon: {s}\nfile: {s}\nhelp: {s}\n",
+        .{ parseErrorIssue(err), file_path, parseErrorHelp(err) },
+    );
+}
+
+fn parseErrorIssue(err: ParseError) []const u8 {
+    return switch (err) {
+        error.OutOfMemory => "out of memory while parsing zpkg.zon",
+        error.ParseZon => "the file is not valid ZON",
+        error.RootMustBeStruct => "the document root must be a ZON struct literal like .{ ... }",
+        error.ExpectedStruct => "expected a ZON struct literal for this field",
+        error.ExpectedString => "expected a string value",
+        error.ExpectedBool => "expected a bool value",
+        error.ExpectedInt => "expected an integer value",
+        error.ExpectedEnumLiteral => "expected an enum literal like .zig or .library",
+        error.InvalidSchemaVersion => "expected top-level .schema = 1",
+        error.MissingPackage => "missing required .package section",
+        error.MissingTargets => "missing required .targets section",
+        error.MissingPackageName => "missing required .package.name string",
+        error.MissingPackageId => "missing required .package.id string",
+        error.MissingPackageVersion => "missing required .package.version string",
+        error.MissingPackageBackend => "missing required .package.backend enum",
+        error.MissingDependencyPackageId => "each .deps.<alias> entry must declare .package = \"<canonical package id>\"",
+        error.MissingDependencyVersionRequirement => "each .deps.<alias>.require entry must declare .version = \"=<version>\"",
+        error.UnknownTopLevelField => "unknown top-level field",
+        error.UnknownPackageField => "unknown field inside .package",
+        error.UnknownOptionField => "unknown field inside .options.<name>",
+        error.UnknownDependencyField => "unknown field inside .deps.<alias>",
+        error.UnknownRequirementField => "unknown field inside .deps.<alias>.require",
+        error.UnknownTargetField => "unknown field inside .targets.<name>",
+        error.UnknownConditionField => "unknown field inside .when",
+        error.UnknownOptionKind => "unsupported .options.<name>.kind value",
+        error.UnsupportedBackend => "unsupported .package.backend value",
+        error.UnsupportedTargetKind => "unsupported .targets.<name>.kind value",
+        error.InvalidLinkage => "unsupported .targets.<name>.linkage value",
+        error.BadLinkagePlacement => ".targets.<name>.linkage is only valid for .library targets",
+        error.MalformedVersion => ".package.version is malformed",
+        error.InvalidPackageId => ".package.id or .deps.<alias>.package is not a valid canonical package id",
+        error.MalformedVersionConstraint => ".deps.<alias>.require.version is malformed",
+        error.InvalidOptionDefault => ".options.<name>.default must match .kind and .abi must be present",
+        error.UnknownConditionOption => ".when.options references an option not declared in top-level .options",
+        error.ConditionOptionTypeMismatch => ".when.options value type does not match the declared option kind",
+        error.FieldNotAllowed => "a field is present where the Phase 01 schema does not allow it",
+        error.DuplicateTopLevelField => "a top-level field is declared more than once",
+        error.DuplicateOptionName => "an option name is declared more than once",
+        error.DuplicateDependencyAlias => "a dependency alias is declared more than once",
+        error.DuplicateTargetName => "a target name is declared more than once",
+        error.DuplicateConditionOption => "a .when.options key is declared more than once",
+        error.DuplicateField => "a field is declared more than once in the same object",
+    };
+}
+
+fn parseErrorHelp(err: ParseError) []const u8 {
+    return switch (err) {
+        error.OutOfMemory => "retry with more memory available",
+        error.ParseZon => "check for ZON syntax errors or duplicate fields before semantic validation",
+        error.RootMustBeStruct, error.ExpectedStruct => "rewrite the value as a ZON object, for example .{ .schema = 1, ... }",
+        error.ExpectedString => "replace the value with a quoted string",
+        error.ExpectedBool => "replace the value with true or false",
+        error.ExpectedInt => "replace the value with an integer literal",
+        error.ExpectedEnumLiteral => "replace the value with a supported enum literal such as .zig, .host, or .library",
+        error.InvalidSchemaVersion => "set .schema = 1",
+        error.MissingPackage => "add .package = .{ .name = \"...\", .id = \"...\", .version = \"1.2.3\", .backend = .zig }",
+        error.MissingTargets => "add a .targets section declaring at least one exported/public target",
+        error.MissingPackageName => "add .package.name = \"<display-name>\"",
+        error.MissingPackageId => "add .package.id = \"namespace.package_name\"",
+        error.MissingPackageVersion => "add .package.version = \"1.2.3\" or \"1.2.3.0\"",
+        error.MissingPackageBackend => "add .package.backend = .zig",
+        error.MissingDependencyPackageId => "for each dependency alias, add .package = \"namespace.package_name\"",
+        error.MissingDependencyVersionRequirement, error.MalformedVersionConstraint => "for each dependency alias, use .require = .{ .version = \"=<version>\" } in Phase 01",
+        error.UnknownTopLevelField => "allowed top-level fields are .schema, .package, .options, .deps, and .targets",
+        error.UnknownPackageField => "allowed .package fields are .name, .id, .version, and .backend",
+        error.UnknownOptionField => "allowed .options.<name> fields are .kind, .default, and .abi",
+        error.UnknownDependencyField => "allowed .deps.<alias> fields are .package, .require, and .when",
+        error.UnknownRequirementField => "allowed .deps.<alias>.require fields are only .version in Phase 01",
+        error.UnknownTargetField => "allowed .targets.<name> fields are .kind, .linkage, .test_only, and .when",
+        error.UnknownConditionField => "allowed .when fields are .domain, .host_os, .host_arch, .target_os, .target_arch, and .options",
+        error.UnknownOptionKind => "use one of .bool, .int, or .string",
+        error.UnsupportedBackend => "Phase 01 only supports .package.backend = .zig",
+        error.UnsupportedTargetKind => "use one of .library, .executable, .zig_module, .headers, or .resource_set",
+        error.InvalidLinkage => "use one of .default, .shared, or .static",
+        error.BadLinkagePlacement => "remove .linkage from non-library targets or change .kind to .library",
+        error.MalformedVersion => "use x.y.z or x.y.z.w; the parser will normalize x.y.z to x.y.z.0",
+        error.InvalidPackageId => "use a non-empty namespaced identifier like \"zpkg.example.hello_lib\"",
+        error.InvalidOptionDefault => "ensure .default matches .kind and set .abi = true or false",
+        error.UnknownConditionOption => "declare the option in top-level .options before referencing it in .when.options",
+        error.ConditionOptionTypeMismatch => "make the .when.options value type match the option kind declared in .options",
+        error.FieldNotAllowed => "remove the unsupported field from the manifest",
+        error.DuplicateTopLevelField, error.DuplicateOptionName, error.DuplicateDependencyAlias, error.DuplicateTargetName, error.DuplicateConditionOption, error.DuplicateField => "remove the duplicate field so each key appears only once in its object",
+    };
+}
+
 pub fn parseSliceAlloc(allocator: std.mem.Allocator, source: [:0]const u8) ParseError!Manifest {
     var ast = Ast.parse(allocator, source, .zon) catch return error.OutOfMemory;
     defer ast.deinit(allocator);
@@ -63,14 +159,14 @@ pub fn parseSliceAlloc(allocator: std.mem.Allocator, source: [:0]const u8) Parse
     return parseZoirAlloc(allocator, source, ast, zoir);
 }
 
-pub fn parseFileAlloc(allocator: std.mem.Allocator, dir: std.fs.Dir, sub_path: []const u8) ParseError!Manifest {
+pub fn parseFileAlloc(allocator: std.mem.Allocator, dir: std.Io.Dir, io: std.Io, sub_path: []const u8) ParseError!Manifest {
     const source = dir.readFileAllocOptions(
-        allocator,
+        io,
         sub_path,
-        64 * 1024,
+        allocator,
+        .limited(64 * 1024),
+        .of(u8),
         null,
-        @alignOf(u8),
-        0,
     ) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.ParseZon,
@@ -1120,4 +1216,24 @@ test "reject disallowed dependency fields and duplicate target names" {
         \\    },
         \\}
     , error.ParseZon);
+}
+
+test "diagnostic for malformed package version is actionable" {
+    const allocator = std.testing.allocator;
+    const diagnostic = try formatDiagnosticAlloc(allocator, "fixtures/bad-version/zpkg.zon", error.MalformedVersion);
+    defer allocator.free(diagnostic);
+
+    try std.testing.expect(std.mem.indexOf(u8, diagnostic, "fixtures/bad-version/zpkg.zon") != null);
+    try std.testing.expect(std.mem.indexOf(u8, diagnostic, ".package.version") != null);
+    try std.testing.expect(std.mem.indexOf(u8, diagnostic, "x.y.z or x.y.z.w") != null);
+}
+
+test "diagnostic for bad linkage placement is actionable" {
+    const allocator = std.testing.allocator;
+    const diagnostic = try formatDiagnosticAlloc(allocator, "fixtures/bad-linkage/zpkg.zon", error.BadLinkagePlacement);
+    defer allocator.free(diagnostic);
+
+    try std.testing.expect(std.mem.indexOf(u8, diagnostic, ".targets.<name>.linkage") != null);
+    try std.testing.expect(std.mem.indexOf(u8, diagnostic, "only valid for .library targets") != null);
+    try std.testing.expect(std.mem.indexOf(u8, diagnostic, "remove .linkage") != null);
 }

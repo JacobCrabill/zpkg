@@ -578,6 +578,8 @@ Stored/exported artifact manifests should capture at least:
 - exported targets
 - resolved dependency instance keys
 
+Manifest `.deps` keys use resolved dependency identity in `<package_id>#<domain>` form so the same package can appear in both host and target domains.
+
 Example:
 
 ```zig
@@ -596,7 +598,8 @@ Example:
         .shared = true,
     },
     .deps = .{
-        ."sai.example.bar" = "<instance_key>",
+        .@"sai.example.bar#host" = "<host_instance_key>",
+        .@"sai.example.bar#target" = "<target_instance_key>",
     },
 }
 ```
