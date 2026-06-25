@@ -1,0 +1,28 @@
+.{
+    .schema = 1,
+
+    .package = .{
+        .name = "hello-app",
+        .id = "zpkg.example.hello_app",
+        .version = "0.1.0.0",
+        .backend = .zig,
+    },
+
+    .deps = .{
+        .hello_lib = .{
+            .package = "zpkg.example.hello_lib",
+            .require = .{ .version = "=0.1.0.0" },
+        },
+        .hello_tool = .{
+            .package = "zpkg.example.hello_tool",
+            .require = .{ .version = "=0.1.0.0" },
+            .when = .{ .domain = .host },
+        },
+    },
+
+    .targets = .{
+        .hello_app = .{
+            .kind = .executable,
+        },
+    },
+}

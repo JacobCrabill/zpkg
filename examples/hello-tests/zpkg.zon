@@ -1,0 +1,42 @@
+.{
+    .schema = 1,
+
+    .package = .{
+        .name = "hello-tests",
+        .id = "zpkg.example.hello_tests",
+        .version = "0.1.0.0",
+        .backend = .zig,
+    },
+
+    .options = .{
+        .build_tests = .{
+            .kind = .bool,
+            .default = true,
+            .abi = false,
+        },
+    },
+
+    .deps = .{
+        .hello_lib = .{
+            .package = "zpkg.example.hello_lib",
+            .require = .{ .version = "=0.1.0.0" },
+        },
+        .hello_tool = .{
+            .package = "zpkg.example.hello_tool",
+            .require = .{ .version = "=0.1.0.0" },
+            .when = .{ .domain = .host },
+        },
+    },
+
+    .targets = .{
+        .hello_tests = .{
+            .kind = .executable,
+            .test_only = true,
+            .when = .{
+                .options = .{
+                    .build_tests = true,
+                },
+            },
+        },
+    },
+}

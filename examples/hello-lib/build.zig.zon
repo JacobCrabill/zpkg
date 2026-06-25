@@ -1,7 +1,7 @@
 .{
     .name = .hello_lib,
     .version = "0.1.0",
-    .fingerprint = 0xc71d7804894a0880,
+    .fingerprint = 0x74db6dcbaf600f55,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},
     .paths = .{
