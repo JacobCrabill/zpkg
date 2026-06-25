@@ -61,6 +61,12 @@ pub const manifest = @import("manifest.zig");
 pub const ArtifactManifest = manifest.Manifest;
 pub const ManifestDependency = manifest.Dependency;
 
+pub const toolchain = @import("toolchain.zig");
+pub const ToolchainSchemaVersion = toolchain.schema_version;
+pub const ToolchainIdentity = toolchain.Identity;
+pub const ToolchainFingerprint = toolchain.Fingerprint;
+pub const ToolchainValidationError = toolchain.ValidationError;
+
 test "model core exports are wired" {
     _ = domain;
     _ = version;
@@ -72,6 +78,7 @@ test "model core exports are wired" {
     _ = lockfile;
     _ = graph;
     _ = manifest;
+    _ = toolchain;
 }
 
 test "model root references exported types" {
@@ -116,4 +123,8 @@ test "model root references exported types" {
     _ = GraphResourceDir;
     _ = ArtifactManifest;
     _ = ManifestDependency;
+    _ = ToolchainSchemaVersion;
+    _ = ToolchainIdentity;
+    _ = ToolchainFingerprint;
+    _ = ToolchainValidationError;
 }
