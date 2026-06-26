@@ -127,6 +127,21 @@ Reviewer verifies that required findings are resolved.
 
 Only then may the lane be merged or marked complete.
 
+### Step 6 - Manager updates status ledger
+
+After review approval or a new required-finding cycle, the Manager must update:
+
+- `docs/implementation/current-status.md`
+
+The status ledger should record:
+
+- lane name
+- current phase status
+- developer/reviewer result
+- whether the lane is active, blocked, approved, merged, or superseded
+- any stash/branch/recovery points created during management
+- the next required action
+
 ---
 
 ## Review scope checklist

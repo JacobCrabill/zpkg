@@ -100,7 +100,23 @@ For every developer lane:
 2. when it finishes, launch a clean reviewer subagent
 3. if the reviewer returns required findings, resume the developer lane and fix them
 4. re-run review until the reviewer approves
-5. only then merge and advance dependent waves
+5. update `docs/implementation/current-status.md`
+6. only then merge and advance dependent waves
+
+### Status ledger rule
+
+At every major transition, update:
+
+- `docs/implementation/current-status.md`
+
+Minimum required updates:
+- lane started
+- lane timed out or stalled
+- lane superseded by a fresh lane
+- reviewer findings received
+- reviewer approved
+- lane merged
+- stash/branch recovery point created
 
 ---
 

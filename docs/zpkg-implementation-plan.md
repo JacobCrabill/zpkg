@@ -7,6 +7,7 @@ This document breaks the `zpkg` MVP into logical implementation phases with expl
 Detailed per-phase breakdowns suitable for parallel subagents live under:
 
 - `docs/implementation/README.md`
+- `docs/implementation/current-status.md`
 - `docs/implementation/phase-00-bootstrap.md`
 - `docs/implementation/phase-01-schema-and-model.md`
 - `docs/implementation/phase-02-hashing-and-identity.md`

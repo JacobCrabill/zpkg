@@ -79,6 +79,24 @@ Reviewer output must separate:
 
 A lane is not complete until the reviewer approves it after any required fixes.
 
+## Status update requirement
+
+After every significant state transition, the Manager must update:
+
+- `docs/implementation/current-status.md`
+
+Significant state transitions include:
+
+- developer lane launched
+- developer lane timed out / aborted / superseded
+- developer lane completed
+- reviewer returned required findings
+- reviewer approved
+- lane merged to `main`
+- stash/branch recovery point created
+
+Do not rely on memory or older chat history alone; keep the status ledger exact and current.
+
 ---
 
 ## Lane ownership map

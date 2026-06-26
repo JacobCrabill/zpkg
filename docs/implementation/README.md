@@ -14,6 +14,7 @@ Primary design inputs:
 - `docs/zpkg-lockfile.md`
 - `docs/zpkg-graph-schema.md`
 - `docs/implementation/review-process.md`
+- `docs/implementation/current-status.md`
 
 ## Execution model
 
@@ -112,6 +113,33 @@ Minimum rule set:
 
 No dependent wave should start from an unreviewed lane output.
 
+## Status bookkeeping
+
+The live status ledger is:
+
+- `current-status.md`
+
+Manager must update `current-status.md` whenever any of the following happens:
+
+- a developer lane starts
+- a developer lane completes, times out, or is abandoned
+- a reviewer returns findings
+- required findings are fixed
+- a lane is approved
+- a lane is merged
+- a stash/branch/recovery point is created that matters for later work
+
+`current-status.md` should record the **actual current state**, including:
+
+- current `main` commit
+- whether the working tree is clean
+- per-phase status
+- active / stale / superseded agent IDs
+- important stash entries
+- exact next manager action
+
+Subagent plans and prompts should be treated as intent; `current-status.md` is the operational source of truth.
+
 ## Working rules for subagents
 
 1. Do not change architectural commitments from the root docs without explicit coordination.
@@ -138,4 +166,5 @@ No dependent wave should start from an unreviewed lane output.
 - `phase-09-export-and-relocation.md`
 - `phase-10-reproducibility-and-ci.md`
 - `review-process.md`
+- `current-status.md`
 - `subagent-launch-plan.md`
