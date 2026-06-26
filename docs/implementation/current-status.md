@@ -24,16 +24,13 @@ This file should track the **current exact state**, not an idealized plan.
 ## Repository state
 
 - Branch: `main`
-- HEAD: `c880b80`
-- HEAD summary: `Require full toolchain fingerprint identity`
+- HEAD: `e90a4a0`
+- HEAD summary: `Implement source hash module with file hashing and directory traversal`
 - Working tree: clean
 
 ### Relevant stash entries
 
-- `stash@{0}` — `On main: manager-temp-resolver-before-cleanup`
-  - created to preserve an earlier uncommitted resolver work-in-progress before switching strategy
-- `stash@{1}` — `On pi-agent-cab269d3-3183-48d: manager-temp-untracked`
-  - older schema-core management stash
+- None currently in use
 
 ---
 
@@ -43,11 +40,11 @@ This file should track the **current exact state**, not an idealized plan.
 |---|---|---|
 | Phase 00 - Bootstrap | Approved and merged | Root scaffold complete and reviewed |
 | Phase 01 - Schema and model | Approved and merged | Includes `zpkg.zon`, lockfile, graph, and manifest parsing foundations, plus inspect command |
-| Phase 02 - Hashing and identity | In progress | Toolchain + instance-key subtask implemented and committed; source-hash subtask still missing |
-| Phase 03 - Resolution and lockfile | In progress | No approved resolver implementation on `main` yet |
-| Phase 04 - Store and manifest mgmt | Not started | Waiting on Phases 02 and 03 |
-| Phase 05 - `zpkg-build` and graph emission | Not started | Waiting on Phases 02 and 03 |
-| Phase 06 - Workspace realization | Not started | Waiting on Phases 04 and 05 |
+| Phase 02 - Hashing and identity | Approved and merged | Toolchain + instance-key + source-hash complete |
+| Phase 03 - Resolution and lockfile | Not started | No approved resolver implementation on `main` yet |
+| Phase 04 - Store and manifest mgmt | Not started | Waiting on Phase 03 |
+| Phase 05 - `zpkg-build` and graph emission | Not started | Waiting on Phase 03 |
+| Phase 06 - Workspace realization | Not started | Waiting on Phase 05 |
 | Phase 07 - Build fallback pipeline | Not started | Waiting on Phase 06 |
 | Phase 08 - CLI and UX | Partial | `inspect` exists; broader CLI remains incomplete |
 | Phase 09 - Export and relocation | Not started | Waiting on Phase 07 |
@@ -94,28 +91,15 @@ This file should track the **current exact state**, not an idealized plan.
      - `c880b80` — `Require full toolchain fingerprint identity`
    - Review status: approved
 
+9. **source-hash core**
+   - Outcome: source hashing module for package content hashing
+   - Commits on `main`:
+     - `e90a4a0` — `Implement source hash module with file hashing and directory traversal`
+   - Review status: approved
+
 ---
 
 ## Current active / unresolved work
-
-### Phase 02 - Source-hash subtask
-
-**Status:** not implemented yet
-
-Multiple agent attempts stalled in reconnaissance without producing code on `main`:
-- `1945ae39-591d-4f6` — reconnaissance only
-- `0339030d-f1fa-479` — reconnaissance only
-- `55daf1aa-304c-447` — reconnaissance only
-- `384e9c7d-8723-441` — reconnaissance only
-- `9d60f0fd-0f34-400` — reconnaissance only
-
-**Current truth:**
-- `src/hash/source_hash.zig` does not exist on `main`
-- `src/hash/root.zig` does not yet export a source-hash module
-- no source-hash tests exist on `main`
-
-**Required next step:**
-- launch or continue a tightly-scoped developer lane that directly implements `src/hash/source_hash.zig` and tests
 
 ### Phase 03 - Resolver / lockfile authority
 
@@ -156,38 +140,37 @@ These agent outputs have already been accounted for and should not be used as th
 - `502cb973-1b20-4cb` — hashing reconnaissance only
 - `681ee94e-be9e-441` / branch `pi-agent-681ee94e-be9e-441` — older toolchain-key branch snapshot, superseded by merged `main`
 - `759a124f-1b58-4e7` / `ed9bb80d-1689-403` — older reviews against stale toolchain snapshots
+- `1945ae39-591d-4f6` — source-hash reconnaissance only
+- `0339030d-f1fa-479` — source-hash reconnaissance only
+- `55daf1aa-304c-447` — source-hash reconnaissance only
+- `384e9c7d-8723-441` — source-hash reconnaissance only
+- `9d60f0fd-0f34-400` — source-hash reconnaissance only
 
 ### Open / still relevant
 
 These are the unresolved areas still needing closure:
-- source-hash implementation lane: **none successfully landed yet**
-- resolver-core implementation lane: partial attempts exist, but **none approved/merged**
+- **resolver-core implementation lane:** partial attempts exist, but **none approved/merged**
 
 ---
 
 ## Blocking items
 
-1. **Phase 02 source hash is missing**
-   - blocks full completion of hashing/identity
-   - resolver may temporarily use placeholders, but Phase 02 cannot be called done
-
-2. **Phase 03 resolver/authority implementation is missing on `main`**
+1. **Phase 03 resolver/authority implementation is missing on `main`**
    - blocks later lanes that need a stable resolved graph
 
-3. **Main parallel window cannot start safely**
+2. **Main parallel window cannot start safely**
    - `store-lane`
    - `wrapper-lane`
    - `cli-inspect-graph-lane`
-   should wait until both Phase 02 and Phase 03 are approved and merged
+   should wait until Phase 03 is approved and merged
 
 ---
 
 ## Recommended immediate next actions
 
-1. Finish and approve **Phase 02 source-hash subtask**
-2. Finish and approve **Phase 03 resolver-core**
-3. If needed, follow resolver-core with a second focused **lock/update/build/test/export gate** lane
-4. Only then start:
+1. Complete and approve **Phase 03 resolver-core**
+2. If needed, follow resolver-core with a second focused **lock/update/build/test/export gate** lane
+3. Only then start:
    - store-lane
    - wrapper-lane
    - cli-inspect-graph-lane
