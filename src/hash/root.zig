@@ -9,6 +9,10 @@ pub const InstanceKeyDependency = instance_key.Dependency;
 pub const addInstanceKeyToHash = instance_key.addToHash;
 pub const deriveInstanceKeyHex = instance_key.deriveHex;
 
+pub const source_hash = @import("source_hash.zig");
+pub const hashPackageSource = source_hash.hashPackageSource;
+pub const hashFileContent = source_hash.hashFileContent;
+
 test "hash exports are wired" {
     _ = toolchain_fingerprint;
     _ = serializeToolchainFingerprintAlloc;
@@ -19,4 +23,7 @@ test "hash exports are wired" {
     _ = InstanceKeyDependency;
     _ = addInstanceKeyToHash;
     _ = deriveInstanceKeyHex;
+    _ = source_hash;
+    _ = hashPackageSource;
+    _ = hashFileContent;
 }
