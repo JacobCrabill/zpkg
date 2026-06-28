@@ -24,8 +24,8 @@ This file should track the **current exact state**, not an idealized plan.
 ## Repository state
 
 - Branch: `main`
-- HEAD: `0dfce94`
-- HEAD summary: `Implement Phase 06: workspace realization engine`
+- HEAD: `0458182`
+- HEAD summary: `Implement Phase 07: source-build fallback pipeline`
 - Working tree: clean
 
 ### Relevant stash entries
@@ -45,7 +45,7 @@ This file should track the **current exact state**, not an idealized plan.
 | Phase 04 - Store and manifest mgmt | Approved and merged | Store layout, manifest, archive, Store facade; reviewed and fixed |
 | Phase 05 - `zpkg-build` and graph emission | Approved and merged | Package API, emit, validate, hello-lib migrated; reviewed and fixed |
 | Phase 06 - Workspace realization | Approved and merged | WorkspaceLayout, source symlink-forest, binary adapter, realize CLI |
-| Phase 07 - Build fallback pipeline | Not started | Waiting on Phase 06 — now unblocked |
+| Phase 07 - Build fallback pipeline | Approved and merged | Topo planner, executor, zpkg build/test CLI; reviewed and fixed |
 | Phase 08 - CLI and UX | Partial | `inspect`, `lock`, `update` exist; broader CLI remains incomplete |
 | Phase 09 - Export and relocation | Not started | Waiting on Phase 07 |
 | Phase 10 - Reproducibility and CI | Not started | Waiting on Phases 07/09 |
@@ -107,14 +107,13 @@ This file should track the **current exact state**, not an idealized plan.
 
 ## Current active / unresolved work
 
-### Phase 07 - Build fallback pipeline
+### Phase 08 / 09 / 10 - Remaining phases
 
-**Status:** unblocked, not started
+**Status:** all unblocked
 
-Next up: implement the source-build fallback loop (`zpkg build`):
-- `src/realize/build_fallback.zig`
-- `src/cli/build.zig`
-- End-to-end `zpkg build` for one platform/profile
+- Phase 08 (CLI and UX): `zpkg graph`, `zpkg export` CLI polish — can run now
+- Phase 09 (Export and relocation): `src/cli/export.zig`, `src/export/export.zig`
+- Phase 10 (Reproducibility and CI): deterministic workspace + CI workflows
 
 ---
 
@@ -155,10 +154,12 @@ None currently. Phase 03 is merged. Phases 04/05 parallel window is open.
 
 ## Recommended immediate next actions
 
-Start Phase 07 build fallback pipeline:
-- Implement `src/realize/build_fallback.zig` — topological traversal, binary-miss → source-build → store loop
-- Implement `src/cli/build.zig` — `zpkg build` command
-- Migrate remaining examples to `zpkg-build` (parallel with Phase 07)
+Milestone A (Schemas, hashes, resolution) is complete. Milestone B (Store, wrappers, realization) is complete. Milestone C (End-to-end build) is complete.
+
+Start Milestone D — Phases 08/09/10 in parallel:
+- Phase 08: `zpkg graph` command + CLI polish
+- Phase 09: `zpkg export` relocatable closure bundles
+- Phase 10: reproducibility documentation and CI workflows
 
 ---
 
