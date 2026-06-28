@@ -1,6 +1,6 @@
 # Current Implementation Status
 
-_Last updated by Manager: 2026-06-28 (Phases 08/09/10 complete)_
+_Last updated by Manager: 2026-06-28 (Phase 11 complete — all work units merged)_
 
 ## Source of truth
 
@@ -24,8 +24,8 @@ This file should track the **current exact state**, not an idealized plan.
 ## Repository state
 
 - Branch: `main`
-- HEAD: `a3acd3d`
-- HEAD summary: `Implement Phase 08: graph introspection and CLI polish`
+- HEAD: `db58dc4`
+- HEAD summary: `Implement Phase 11-C: quote non-identifier dep names in generateBuildZigZon`
 - Working tree: clean
 
 ### Relevant stash entries
@@ -107,12 +107,13 @@ This file should track the **current exact state**, not an idealized plan.
 
 ## Current active / unresolved work
 
-All planned phases (00–10) are complete and merged. Known stubs and deferred work:
+All planned phases (00–11) are complete and merged.
 
-- **P07-C**: `zpkg test` delegates to `runBuild(.run_tests)` but does not yet invoke `zig build test` per instance
-- **Example migration**: `hello-headers`, `hello-tool`, `hello-app`, `hello-tests` not yet migrated to `zpkg-build`
-- **Named-target export**: `target_name` filter in `planExport` deferred until `LockfileInstance` carries per-target metadata
-- **`generateBuildZigZon` quoting**: dep names with non-identifier chars (hyphens, dots) need quoting in emitted ZON
+Remaining optional enhancements (not blocking any workflow):
+
+- **`TargetKind.test_suite`**: no dedicated enum variant exists; `hello-tests` uses `.executable`. Adding it would let zpkg distinguish test runners from shippable binaries in the dependency graph.
+- **Named-target filter completeness**: `LockfileInstance.target_name` defaults to `null` (MVP resolves at package+domain granularity). Populating it requires the resolver to track per-target names.
+- **null `target_name` backward-compat test**: the named-target export filter correctly includes null-`target_name` instances, but a test covering that branch explicitly is missing.
 
 ---
 
