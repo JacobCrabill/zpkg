@@ -1,6 +1,6 @@
 # Current Implementation Status
 
-_Last updated by Manager: 2026-06-28 (Phase 11 complete — all work units merged)_
+_Last updated by Manager: 2026-06-28 (Phase 12 spec written — two blocking bugs identified)_
 
 ## Source of truth
 
@@ -24,8 +24,8 @@ This file should track the **current exact state**, not an idealized plan.
 ## Repository state
 
 - Branch: `main`
-- HEAD: `db58dc4`
-- HEAD summary: `Implement Phase 11-C: quote non-identifier dep names in generateBuildZigZon`
+- HEAD: `f82b3dd`
+- HEAD summary: `Clean exit for user-facing errors; no backtrace on known failures`
 - Working tree: clean
 
 ### Relevant stash entries
@@ -107,13 +107,36 @@ This file should track the **current exact state**, not an idealized plan.
 
 ## Current active / unresolved work
 
-All planned phases (00–11) are complete and merged.
+Phases 00–11 complete and merged. Phase 12 spec written — two blocking bugs prevent real builds.
 
-Remaining optional enhancements (not blocking any workflow):
+## Current active / unresolved work
 
-- **`TargetKind.test_suite`**: no dedicated enum variant exists; `hello-tests` uses `.executable`. Adding it would let zpkg distinguish test runners from shippable binaries in the dependency graph.
-- **Named-target filter completeness**: `LockfileInstance.target_name` defaults to `null` (MVP resolves at package+domain granularity). Populating it requires the resolver to track per-target names.
-- **null `target_name` backward-compat test**: the named-target export filter correctly includes null-`target_name` instances, but a test covering that branch explicitly is missing.
+### Phase 12 — Resolver and lockfile completion (BLOCKING)
+
+`zpkg lock` and `zpkg build` run without crashing but produce empty results.
+Two bugs, both in the resolution pipeline:
+
+**P12-A — `parseDependencyManifest` stub** (`src/resolve/root.zig:175`)
+- Returns `deps = &.{}` always; resolver never recurses past depth 1
+- Fix: read actual `zpkg.zon` for each dep from `<source_root>/../<basename>/`
+- Requires `pkg_root` and `io` to be passed into `Resolver`
+
+**P12-B — `generateLockfile` emits empty instances** (`src/cli/lock.zig:135`)
+- `ResolvedRoot` carries only root identity; resolved graph in `Resolver.resolved`
+  is never consulted
+- Fix: walk `Resolver.resolved` and emit one `model.Instance` per entry
+- Depends on P12-A: instances are only populated once the resolver recurses
+
+Without these fixes: lockfile always has `.instances = .{}`, build plan always
+has 0 items, nothing is ever built or cached.
+
+Spec: `docs/implementation/phase-12-resolver-and-lockfile-completion.md`
+
+### Known stubs (non-blocking)
+
+- **`TargetKind.test_suite`**: `hello-tests` uses `.executable`; no enum variant exists yet
+- **Named-target filter completeness**: `LockfileInstance.target_name` is always `null` (resolver tracks package+domain only)
+- **null `target_name` backward-compat test**: correct behavior, no explicit test
 
 ---
 
@@ -156,10 +179,9 @@ None currently. Phase 03 is merged. Phases 04/05 parallel window is open.
 
 Milestone A (Schemas, hashes, resolution) is complete. Milestone B (Store, wrappers, realization) is complete. Milestone C (End-to-end build) is complete.
 
-All milestones complete. Remaining work is optional follow-up:
-- Implement `zpkg test` per-instance `zig build test` invocation (P07-C stub)
-- Migrate remaining examples to `zpkg-build`
-- Add quoting for non-identifier dep names in `generateBuildZigZon`
+**Immediate next action: implement Phase 12 (P12-A then P12-B).**
+
+Phase 12 is the blocker before `zpkg lock && zpkg build` produces any real output.
 
 ---
 
