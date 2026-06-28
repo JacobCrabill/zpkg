@@ -5,7 +5,14 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
     zpkg.cli.run(args, init.io) catch |err| switch (err) {
-        error.InvalidArgument => std.process.exit(1),
+        // These errors have already printed a user-facing message; exit
+        // cleanly without a backtrace.
+        error.InvalidArgument,
+        error.LockfileNotFound,
+        error.LockfileExists,
+        error.LockfileMismatch,
+        error.TestsFailed,
+        => std.process.exit(1),
         else => return err,
     };
 }
