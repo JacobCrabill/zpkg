@@ -313,25 +313,57 @@ pub const BuildExecutor = struct {
         };
 
         // Run `zig build install --prefix <staging_dir>` inside realized_dir.
-        var child = try std.process.spawn(self.io, .{
+        // Two-pass: first run captures stderr to detect a fingerprint mismatch in the
+        // generated build.zig.zon. If Zig reports one, we patch the file and retry.
+        const result = try std.process.run(allocator, self.io, .{
             .argv = &.{ "zig", "build", "install", "--prefix", staging_dir },
             .cwd = .{ .path = realized_dir },
-            .stdin = .inherit,
-            .stdout = .inherit,
-            .stderr = .inherit,
         });
-        const term = try child.wait(self.io);
-        switch (term) {
-            .exited => |code| {
-                if (code != 0) {
-                    try printStderr(self.io, "error: build failed for '{s}' (exit code {d})\n", .{ key, code });
-                    return error.BuildFailed;
+        defer {
+            allocator.free(result.stdout);
+            allocator.free(result.stderr);
+        }
+
+        const build_ok = switch (result.term) {
+            .exited => |code| code == 0,
+            else => false,
+        };
+
+        if (!build_ok) {
+            // Check whether Zig reported a fingerprint problem and suggested a fix.
+            if (extractSuggestedFingerprint(result.stderr)) |fp| {
+                try patchFingerprintInBuildZigZon(allocator, self.io, realized_dir, fp);
+
+                // Second pass: real build with stderr forwarded.
+                var child2 = try std.process.spawn(self.io, .{
+                    .argv = &.{ "zig", "build", "install", "--prefix", staging_dir },
+                    .cwd = .{ .path = realized_dir },
+                    .stdin = .inherit,
+                    .stdout = .inherit,
+                    .stderr = .inherit,
+                });
+                const term2 = try child2.wait(self.io);
+                switch (term2) {
+                    .exited => |code| {
+                        if (code != 0) {
+                            try printStderr(self.io, "error: build failed for '{s}' (exit code {d})\n", .{ key, code });
+                            return error.BuildFailed;
+                        }
+                    },
+                    else => {
+                        try printStderr(self.io, "error: build process for '{s}' terminated abnormally\n", .{key});
+                        return error.BuildFailed;
+                    },
                 }
-            },
-            else => {
-                try printStderr(self.io, "error: build process for '{s}' terminated abnormally\n", .{key});
+            } else {
+                // No fingerprint hint — forward the captured stderr and fail.
+                try printRaw(self.io, result.stderr);
+                switch (result.term) {
+                    .exited => |code| try printStderr(self.io, "error: build failed for '{s}' (exit code {d})\n", .{ key, code }),
+                    else => try printStderr(self.io, "error: build process for '{s}' terminated abnormally\n", .{key}),
+                }
                 return error.BuildFailed;
-            },
+            }
         }
 
         // Build dep_instances list for the manifest.
@@ -422,6 +454,69 @@ fn printStderr(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
     const w = &f.interface;
     try w.print(fmt, args);
     try w.flush();
+}
+
+fn printRaw(io: std.Io, text: []const u8) !void {
+    var buf: [4096]u8 = undefined;
+    var f: std.Io.File.Writer = .init(.stderr(), io, &buf);
+    const w = &f.interface;
+    try w.writeAll(text);
+    try w.flush();
+}
+
+/// Scan zig build stderr for the fingerprint suggestion produced by lines like:
+///   "use this value: 0x41a21f2b57209636"
+fn extractSuggestedFingerprint(stderr: []const u8) ?u64 {
+    const needle = "use this value: 0x";
+    const start = std.mem.indexOf(u8, stderr, needle) orelse return null;
+    const hex_start = start + needle.len;
+    // Find end of hex digits.
+    var hex_end = hex_start;
+    while (hex_end < stderr.len and std.ascii.isHex(stderr[hex_end])) : (hex_end += 1) {}
+    if (hex_end == hex_start) return null;
+    return std.fmt.parseInt(u64, stderr[hex_start..hex_end], 16) catch null;
+}
+
+/// Rewrite the `fingerprint` field in `<dir>/build.zig.zon`.
+fn patchFingerprintInBuildZigZon(allocator: std.mem.Allocator, io: std.Io, dir: []const u8, fp: u64) !void {
+    const dir_obj = try std.Io.Dir.openDirAbsolute(io, dir, .{});
+    defer dir_obj.close(io);
+
+    const content = try dir_obj.readFileAlloc(io, "build.zig.zon", allocator, .limited(256 * 1024));
+    defer allocator.free(content);
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    const w = &aw.writer;
+
+    const fp_needle = ".fingerprint = ";
+    if (std.mem.indexOf(u8, content, fp_needle)) |needle_pos| {
+        // Replace existing fingerprint line.
+        try w.writeAll(content[0 .. needle_pos + fp_needle.len]);
+        try w.print("0x{x:0>16}", .{fp});
+        // Skip old value up to the comma.
+        const after_needle = needle_pos + fp_needle.len;
+        const comma = std.mem.indexOfScalarPos(u8, content, after_needle, ',') orelse content.len;
+        try w.writeAll(content[comma..]);
+    } else {
+        // Insert fingerprint after opening `.{`.
+        const open_brace = std.mem.indexOf(u8, content, ".{\n") orelse {
+            // Unexpected format; just prepend.
+            try w.print(".{{\n    .fingerprint = 0x{x:0>16},\n", .{fp});
+            try w.writeAll(content);
+            const patched = try aw.toOwnedSlice();
+            defer allocator.free(patched);
+            return dir_obj.writeFile(io, .{ .sub_path = "build.zig.zon", .data = patched });
+        };
+        const insert_at = open_brace + ".{\n".len;
+        try w.writeAll(content[0..insert_at]);
+        try w.print("    .fingerprint = 0x{x:0>16},\n", .{fp});
+        try w.writeAll(content[insert_at..]);
+    }
+
+    const patched = try aw.toOwnedSlice();
+    defer allocator.free(patched);
+    try dir_obj.writeFile(io, .{ .sub_path = "build.zig.zon", .data = patched });
 }
 
 test "planBuild topological order: leaves before parents" {

@@ -4,8 +4,26 @@ const conditions = @import("../model/conditions.zig");
 const schema = @import("../schema/zpkg.zig");
 const resolve = @import("../resolve/root.zig");
 const drift = @import("../resolve/drift.zig");
+const source_hash = @import("../hash/source_hash.zig");
+
+pub const help_text =
+    \\zpkg lock — Create an authoritative lockfile (zpkg.lock.zon)
+    \\
+    \\Usage:
+    \\  zpkg lock <pkg-root>
+    \\
+    \\Arguments:
+    \\  <pkg-root>   Path to the package directory containing zpkg.zon
+    \\
+    \\Example:
+    \\  zpkg lock .
+    \\
+;
 
 pub fn run(args: []const []const u8, io: std.Io) !void {
+    if (args.len >= 3 and (std.mem.eql(u8, args[2], "--help") or std.mem.eql(u8, args[2], "-h"))) {
+        return writeHelp(io);
+    }
     if (args.len != 3) {
         try writeUsageError(io);
         return error.InvalidArgument;
@@ -52,7 +70,7 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
         .target_arch = conditions.Arch.x86_64,
     };
 
-    var resolver = resolve.Resolver.init(allocator, environment.host_os, environment.host_arch, environment.target_os, environment.target_arch, &.{});
+    var resolver = resolve.Resolver.init(allocator, environment.host_os, environment.host_arch, environment.target_os, environment.target_arch, &.{}, pkg_root, io);
     defer resolver.deinit();
 
     const resolved = resolver.resolveRoot(manifest) catch |err| {
@@ -61,7 +79,11 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     };
 
     // Generate lockfile
-    const lockfile = generateLockfile(allocator, resolved);
+    const lockfile = generateLockfile(allocator, io, pkg_root, resolved, &resolver) catch |err| {
+        try writeGenerationError(io, err);
+        return error.OutOfMemory;
+    };
+
     defer lockfile.deinit(allocator);
 
     // Write lockfile
@@ -90,6 +112,14 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
 
 fn formatLockfilePath(allocator: std.mem.Allocator, pkg_root: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}/zpkg.lock.zon", .{pkg_root});
+}
+
+fn writeHelp(io: std.Io) !void {
+    var buf: [2048]u8 = undefined;
+    var fw: std.Io.File.Writer = .init(.stdout(), io, &buf);
+    const w = &fw.interface;
+    try w.writeAll(help_text);
+    try w.flush();
 }
 
 fn writeUsageError(io: std.Io) !void {
@@ -132,10 +162,74 @@ fn writeStderrFmt(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
     try stderr.flush();
 }
 
-fn generateLockfile(allocator: std.mem.Allocator, resolved: resolve.ResolvedRoot) model.Lockfile {
-    // Clone package_id so Lockfile.root owns its text independently of the
-    // parsed manifest (which is freed separately via manifest.deinitOwned).
-    const cloned_id = resolved.package_id.cloneOwned(allocator) catch unreachable;
+fn generateLockfile(allocator: std.mem.Allocator, io: std.Io, pkg_root: []const u8, resolved: resolve.ResolvedRoot, resolver: *resolve.Resolver) !model.Lockfile {
+    const cloned_id = try resolved.package_id.cloneOwned(allocator);
+    errdefer cloned_id.deinitOwned(allocator);
+
+    var instances: std.ArrayList(model.LockfileInstance) = .empty;
+    errdefer {
+        for (instances.items) |inst| inst.deinit(allocator);
+        instances.deinit(allocator);
+    }
+
+    var it = resolver.resolved.iterator();
+    while (it.next()) |entry| {
+        const pkg = entry.value_ptr.*;
+
+        // Skip the root package — it is represented by lockfile.root, not instances
+        if (pkg.package_id.eql(resolved.package_id)) continue;
+
+        const inst_key = try model.LockfileInstanceRef.parseOwned(allocator, entry.key_ptr.*);
+        errdefer inst_key.deinitOwned(allocator);
+
+        const inst_pkg_id = try pkg.package_id.cloneOwned(allocator);
+        errdefer inst_pkg_id.deinitOwned(allocator);
+
+        // Compute source hash for this dependency.
+        const pkg_id_text = pkg.package_id.asText();
+        const basename = if (std.mem.lastIndexOfScalar(u8, pkg_id_text, '.')) |dot|
+            pkg_id_text[dot + 1 ..]
+        else
+            pkg_id_text;
+        const dep_dir_path = try std.Io.Dir.path.join(allocator, &.{ pkg_root, "..", basename });
+        defer allocator.free(dep_dir_path);
+        const dep_dir = try std.Io.Dir.cwd().openDir(io, dep_dir_path, .{});
+        defer dep_dir.close(io);
+        const hex = try source_hash.hashPackageSource(allocator, dep_dir, io, 1);
+        const src_hash_str = try allocator.dupe(u8, &hex);
+        errdefer allocator.free(src_hash_str);
+
+        var deps = try allocator.alloc(model.LockfileDependency, pkg.deps.len);
+        errdefer allocator.free(deps);
+        var deps_filled: usize = 0;
+        errdefer {
+            for (deps[0..deps_filled]) |dep| {
+                dep.instance.deinitOwned(allocator);
+                dep.deinit(allocator);
+            }
+        }
+        for (pkg.deps, 0..) |dep, i| {
+            deps[i] = .{
+                .alias = try allocator.dupe(u8, dep.alias),
+                .instance = .{
+                    .package_id = try dep.instance.package_id.cloneOwned(allocator),
+                    .domain = dep.instance.domain,
+                },
+            };
+            deps_filled = i + 1;
+        }
+
+        try instances.append(allocator, .{
+            .key = inst_key,
+            .package_id = inst_pkg_id,
+            .domain = pkg.domain,
+            .version = pkg.version,
+            .source_hash = src_hash_str,
+            .selected_options = &.{},
+            .deps = deps,
+        });
+    }
+
     return .{
         .schema = 1,
         .root = .{
@@ -143,6 +237,6 @@ fn generateLockfile(allocator: std.mem.Allocator, resolved: resolve.ResolvedRoot
             .version = resolved.version,
         },
         .generated_by = null,
-        .instances = &.{},
+        .instances = try instances.toOwnedSlice(allocator),
     };
 }

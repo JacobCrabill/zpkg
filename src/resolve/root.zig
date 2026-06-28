@@ -12,6 +12,7 @@ pub const ResolverError = error{
     InvalidCondition,
     OptionNotDeclared,
     OptionTypeMismatch,
+    DependencyManifestNotFound,
 };
 
 pub const Resolver = struct {
@@ -20,6 +21,8 @@ pub const Resolver = struct {
     selected_options: []const model.NamedOptionValue,
     resolved: ResolvedGraph,
     package_cache: PackageCache,
+    source_root: []const u8,
+    io: std.Io,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -28,6 +31,8 @@ pub const Resolver = struct {
         target_os: conditions.Os,
         target_arch: conditions.Arch,
         option_values: []const model.NamedOptionValue,
+        source_root: []const u8,
+        io: std.Io,
     ) Resolver {
         return .{
             .allocator = allocator,
@@ -41,6 +46,8 @@ pub const Resolver = struct {
             .selected_options = option_values,
             .resolved = ResolvedGraph.init(allocator),
             .package_cache = PackageCache.init(allocator),
+            .source_root = source_root,
+            .io = io,
         };
     }
 
@@ -173,24 +180,24 @@ pub const Resolver = struct {
     }
 
     fn parseDependencyManifest(self: *Resolver, dep: model.Dependency) !model.PackageManifest {
-        // Return a minimal manifest. deinitOwned will free name and id.text,
-        // so both must be heap-allocated copies (not string literals or slices
-        // into dep, which is owned by the parent manifest).
-        const pkg_text = dep.package.asText();
-        const name = try self.allocator.dupe(u8, pkg_text);
-        errdefer self.allocator.free(name);
-        const id_text = try self.allocator.dupe(u8, pkg_text);
-        return model.PackageManifest{
-            .schema = 1,
-            .package = .{
-                .name = name,
-                .id = .{ .text = id_text },
-                .version = dep.require.exact,
-                .backend = .zig,
-            },
-            .options = &.{},
-            .deps = &.{},
-            .targets = &.{},
+        const pkg_id_text = dep.package.asText();
+        const basename = if (std.mem.lastIndexOfScalar(u8, pkg_id_text, '.')) |dot|
+            pkg_id_text[dot + 1 ..]
+        else
+            pkg_id_text;
+
+        const dep_dir_path = try std.Io.Dir.path.join(self.allocator, &.{ self.source_root, "..", basename });
+        defer self.allocator.free(dep_dir_path);
+
+        var dep_dir = std.Io.Dir.cwd().openDir(self.io, dep_dir_path, .{}) catch {
+            std.log.err("zpkg: dependency manifest not found at '{s}/zpkg.zon'", .{dep_dir_path});
+            return error.DependencyManifestNotFound;
+        };
+        defer dep_dir.close(self.io);
+
+        return schema.parseFileAlloc(self.allocator, dep_dir, self.io, "zpkg.zon") catch {
+            std.log.err("zpkg: failed to parse dependency manifest at '{s}/zpkg.zon'", .{dep_dir_path});
+            return error.DependencyManifestNotFound;
         };
     }
 };
@@ -223,11 +230,17 @@ pub const ResolvedGraph = struct {
     fn remove(self: *ResolvedGraph, key: []const u8) void {
         self.entries.remove(key);
     }
+
+    pub fn iterator(self: *ResolvedGraph) ResolvedEntryList.Iterator {
+        return self.entries.iterator();
+    }
 };
 
 const ResolvedEntryList = struct {
     allocator: std.mem.Allocator,
     entries: std.StringHashMapUnmanaged(*ResolvedPackage),
+
+    pub const Iterator = std.StringHashMapUnmanaged(*ResolvedPackage).Iterator;
 
     fn init(allocator: std.mem.Allocator) ResolvedEntryList {
         return .{
@@ -261,9 +274,13 @@ const ResolvedEntryList = struct {
             self.allocator.free(kv.key);
         }
     }
+
+    fn iterator(self: *ResolvedEntryList) Iterator {
+        return self.entries.iterator();
+    }
 };
 
-const ResolvedPackage = struct {
+pub const ResolvedPackage = struct {
     allocator: std.mem.Allocator,
     package_id: model.PackageId,
     domain: model.Domain,
@@ -296,7 +313,7 @@ const ResolvedPackage = struct {
     }
 };
 
-const Dependency = struct {
+pub const Dependency = struct {
     alias: []const u8,
     instance: model.LockfileInstanceRef,
 };
@@ -356,7 +373,7 @@ fn formatInstanceKey(allocator: std.mem.Allocator, package_id: model.PackageId, 
 
 test "resolver initializes correctly" {
     const allocator = std.testing.allocator;
-    var resolver = Resolver.init(allocator, .linux, .x86_64, .linux, .x86_64, &.{});
+    var resolver = Resolver.init(allocator, .linux, .x86_64, .linux, .x86_64, &.{}, ".", std.testing.io);
     defer resolver.deinit();
 
     _ = resolver.allocator;
@@ -364,7 +381,7 @@ test "resolver initializes correctly" {
 
 test "resolver resolves empty package" {
     const allocator = std.testing.allocator;
-    var resolver = Resolver.init(allocator, .linux, .x86_64, .linux, .x86_64, &.{});
+    var resolver = Resolver.init(allocator, .linux, .x86_64, .linux, .x86_64, &.{}, ".", std.testing.io);
     defer resolver.deinit();
 
     const manifest = model.PackageManifest{

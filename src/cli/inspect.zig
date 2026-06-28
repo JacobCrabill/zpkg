@@ -1,7 +1,24 @@
 const std = @import("std");
 const zpkg_schema = @import("../schema/zpkg.zig");
 
+pub const help_text =
+    \\zpkg inspect — Inspect package metadata from zpkg.zon
+    \\
+    \\Usage:
+    \\  zpkg inspect <pkg-root>
+    \\
+    \\Arguments:
+    \\  <pkg-root>   Path to the package directory containing zpkg.zon
+    \\
+    \\Example:
+    \\  zpkg inspect .
+    \\
+;
+
 pub fn run(args: []const []const u8, io: std.Io) !void {
+    if (args.len >= 3 and (std.mem.eql(u8, args[2], "--help") or std.mem.eql(u8, args[2], "-h"))) {
+        return writeHelp(io);
+    }
     if (args.len != 3) {
         try writeUsageError(io);
         return error.InvalidArgument;
@@ -58,6 +75,14 @@ fn inspectPackageAllocForCli(allocator: std.mem.Allocator, pkg_root: []const u8,
     defer manifest.deinitOwned(allocator);
 
     return zpkg_schema.formatNormalizedAlloc(allocator, manifest);
+}
+
+fn writeHelp(io: std.Io) !void {
+    var buf: [2048]u8 = undefined;
+    var f: std.Io.File.Writer = .init(.stdout(), io, &buf);
+    const w = &f.interface;
+    try w.writeAll(help_text);
+    try w.flush();
 }
 
 fn writeUsageError(io: std.Io) !void {

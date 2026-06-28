@@ -4,7 +4,29 @@ const realize = @import("../realize/root.zig");
 const store_mod = @import("../store/store.zig");
 const diag_util = @import("../util/diag.zig");
 
+pub const help_text =
+    \\zpkg realize — Materialize the generated workspace (.zpkg/)
+    \\
+    \\Usage:
+    \\  zpkg realize <pkg-root>
+    \\
+    \\Arguments:
+    \\  <pkg-root>   Path to the package directory containing zpkg.lock.zon
+    \\
+    \\Example:
+    \\  zpkg realize .
+    \\
+;
+
 pub fn run(args: []const []const u8, io: std.Io) !void {
+    if (args.len >= 3 and (std.mem.eql(u8, args[2], "--help") or std.mem.eql(u8, args[2], "-h"))) {
+        var buf: [2048]u8 = undefined;
+        var fw: std.Io.File.Writer = .init(.stdout(), io, &buf);
+        const w = &fw.interface;
+        try w.writeAll(help_text);
+        try w.flush();
+        return;
+    }
     if (args.len != 3) {
         try writeStderr(io,
             "error: realize expects exactly one package root path\n" ++

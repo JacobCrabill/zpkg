@@ -1,6 +1,6 @@
 # Current Implementation Status
 
-_Last updated by Manager: 2026-06-28 (Phase 12 spec written — two blocking bugs identified)_
+_Last updated by Manager: 2026-06-28 (Phase 12 complete; Phase 13 spec written)_
 
 ## Source of truth
 
@@ -49,6 +49,8 @@ This file should track the **current exact state**, not an idealized plan.
 | Phase 08 - CLI and UX | Approved and merged | graph command, diag helpers, CLI polish, quickstart doc |
 | Phase 09 - Export and relocation | Approved and merged | planExport, assembleBundle, collision policy, zpkg export CLI |
 | Phase 10 - Reproducibility and CI | Approved and merged | determinism sort fix, reproducibility doc, CI workflow |
+| Phase 12 - Resolver and lockfile completion | Approved and merged | parseDependencyManifest reads real zpkg.zon; generateLockfile walks resolved graph; fingerprint and extra-dep fixes in workspace build.zig.zon |
+| Phase 13 - Source hash, per-command help, realize fix | Spec written | real source_hash at lock time; --help for all subcommands; zpkg realize workspace fingerprint fix |
 
 ---
 
@@ -107,30 +109,27 @@ This file should track the **current exact state**, not an idealized plan.
 
 ## Current active / unresolved work
 
-Phases 00–11 complete and merged. Phase 12 spec written — two blocking bugs prevent real builds.
+Phases 00–12 complete and merged. Phase 13 spec written.
 
-## Current active / unresolved work
+### Phase 13 — Source hash and per-command help (next up)
 
-### Phase 12 — Resolver and lockfile completion (BLOCKING)
+Two independent features; neither blocks the other:
 
-`zpkg lock` and `zpkg build` run without crashing but produce empty results.
-Two bugs, both in the resolution pipeline:
+**P13-A — Real `source_hash` at lock time** (`src/cli/lock.zig`, `src/cli/update.zig`)
+- Currently writes `"0000000000000000000000000000000000000000"` placeholder
+- Fix: call `src/hash/source_hash.hashDirHexAlloc` for each dep's sibling directory
+- Spec: `docs/implementation/phase-13-source-hash-and-help.md`
 
-**P12-A — `parseDependencyManifest` stub** (`src/resolve/root.zig:175`)
-- Returns `deps = &.{}` always; resolver never recurses past depth 1
-- Fix: read actual `zpkg.zon` for each dep from `<source_root>/../<basename>/`
-- Requires `pkg_root` and `io` to be passed into `Resolver`
+**P13-B — Per-command `--help` / `-h`** (all 8 subcommand files)
+- `zpkg <cmd> --help` currently hits usage-error path instead of printing help
+- Fix: add `pub const help_text` and a `shouldShowHelp` check to each subcommand
+- Spec: `docs/implementation/phase-13-source-hash-and-help.md`
 
-**P12-B — `generateLockfile` emits empty instances** (`src/cli/lock.zig:135`)
-- `ResolvedRoot` carries only root identity; resolved graph in `Resolver.resolved`
-  is never consulted
-- Fix: walk `Resolver.resolved` and emit one `model.Instance` per entry
-- Depends on P12-A: instances are only populated once the resolver recurses
-
-Without these fixes: lockfile always has `.instances = .{}`, build plan always
-has 0 items, nothing is ever built or cached.
-
-Spec: `docs/implementation/phase-12-resolver-and-lockfile-completion.md`
+**P13-C — `zpkg realize` workspace fingerprint** (`src/realize/source_pkg.zig`)
+- Generated `build.zig.zon` carries source fingerprint but content differs (changed dep paths, `paths = .{"."}`)
+- `zig build` in the realized workspace fails with "invalid fingerprint"
+- Fix: (A) copy `.paths` from source `build.zig.zon`; (B) run lightweight zig invocation post-generation to detect and patch fingerprint; extract fingerprint helpers from `build_fallback.zig` into `src/util/zon_fingerprint.zig`
+- Spec: `docs/implementation/phase-13-source-hash-and-help.md`
 
 ### Known stubs (non-blocking)
 
@@ -179,9 +178,9 @@ None currently. Phase 03 is merged. Phases 04/05 parallel window is open.
 
 Milestone A (Schemas, hashes, resolution) is complete. Milestone B (Store, wrappers, realization) is complete. Milestone C (End-to-end build) is complete.
 
-**Immediate next action: implement Phase 12 (P12-A then P12-B).**
+**Immediate next action: implement Phase 13 (P13-A, P13-B, and P13-C are all independent — can run in parallel; within P13-C do sub-fix A before sub-fix B).**
 
-Phase 12 is the blocker before `zpkg lock && zpkg build` produces any real output.
+Phase 13 completes the end-to-end workflow with real content hashes and full CLI help coverage.
 
 ---
 

@@ -4,6 +4,22 @@ const store_mod = @import("../store/store.zig");
 const export_engine = @import("../export/export.zig");
 const diag_util = @import("../util/diag.zig");
 
+pub const help_text =
+    \\zpkg export — Export a relocatable closure bundle
+    \\
+    \\Usage:
+    \\  zpkg export <pkg-root> [<package_id>:<target_name>]
+    \\
+    \\Arguments:
+    \\  <pkg-root>                      Path to the package directory
+    \\  <package_id>:<target_name>      Optional: export a specific named target
+    \\
+    \\Example:
+    \\  zpkg export .
+    \\  zpkg export . myorg.mypkg:my_lib
+    \\
+;
+
 pub fn run(args: []const []const u8, io: std.Io) !void {
     // Usage: zpkg export <pkg-root> [<package_id>:<target_name>]
     var pkg_root: ?[]const u8 = null;
@@ -11,7 +27,14 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
 
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
-        if (pkg_root == null) {
+        if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
+            var buf: [2048]u8 = undefined;
+            var fw: std.Io.File.Writer = .init(.stdout(), io, &buf);
+            const w = &fw.interface;
+            try w.writeAll(help_text);
+            try w.flush();
+            return;
+        } else if (pkg_root == null) {
             pkg_root = args[i];
         } else if (named_arg == null) {
             named_arg = args[i];

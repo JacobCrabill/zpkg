@@ -5,13 +5,37 @@ const build_fallback = @import("../realize/build_fallback.zig");
 const store_mod = @import("../store/store.zig");
 const diag = @import("../util/diag.zig");
 
+pub const help_text =
+    \\zpkg build — Build all instances from the lockfile
+    \\
+    \\Usage:
+    \\  zpkg build <pkg-root> [--with-tests]
+    \\
+    \\Arguments:
+    \\  <pkg-root>     Path to the package directory containing zpkg.lock.zon
+    \\
+    \\Options:
+    \\  --with-tests   Also build test instances
+    \\
+    \\Example:
+    \\  zpkg build .
+    \\
+;
+
 pub fn run(args: []const []const u8, io: std.Io) !void {
     var with_tests = false;
     var pkg_root: ?[]const u8 = null;
 
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--with-tests")) {
+        if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
+            var buf: [2048]u8 = undefined;
+            var fw: std.Io.File.Writer = .init(.stdout(), io, &buf);
+            const w = &fw.interface;
+            try w.writeAll(help_text);
+            try w.flush();
+            return;
+        } else if (std.mem.eql(u8, args[i], "--with-tests")) {
             with_tests = true;
         } else if (pkg_root == null) {
             pkg_root = args[i];
@@ -116,11 +140,118 @@ pub fn runBuild(pkg_root: []const u8, mode: build_fallback.BuildMode, io: std.Io
 
     try executor.execute(plan, lockfile);
 
+    // Build the root package.
+    try buildRoot(allocator, io, abs_root, manifest, lockfile, &layout, mode);
+
     try stdout.print(
         "Build complete. Profile: {s}\n",
         .{profile},
     );
     try stdout.flush();
+}
+
+fn buildRoot(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    pkg_root: []const u8,
+    manifest: schema.zpkg.Manifest,
+    lockfile: schema.Lockfile,
+    layout: *realize.WorkspaceLayout,
+    mode: build_fallback.BuildMode,
+) !void {
+    const root_dir = try layout.rootPkgDir(allocator);
+    defer allocator.free(root_dir);
+
+    std.Io.Dir.createDirAbsolute(io, root_dir, .default_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+
+    // Build dep_map: alias → workspace dep dir, from manifest deps cross-referenced
+    // with lockfile instances.
+    var root_dep_map = realize.DepPathMap.init(allocator);
+    defer {
+        var it = root_dep_map.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.*);
+        }
+        root_dep_map.deinit();
+    }
+
+    for (manifest.deps) |dep| {
+        // Find the lockfile instance for this dep.
+        for (lockfile.instances) |instance| {
+            if (!instance.key.package_id.eql(dep.package)) continue;
+            const dep_key = try std.fmt.allocPrint(allocator, "{s}#{s}", .{
+                instance.key.package_id.asText(),
+                instance.key.domain.asText(),
+            });
+            defer allocator.free(dep_key);
+            const dep_path = try layout.depPkgDir(allocator, dep_key);
+            errdefer allocator.free(dep_path);
+            const alias_key = try allocator.dupe(u8, dep.alias);
+            errdefer allocator.free(alias_key);
+            try root_dep_map.put(alias_key, dep_path);
+            break;
+        }
+    }
+
+    // Realize the root package into the workspace.
+    var source_realizer = realize.SourcePkgRealize.init(allocator, io);
+    source_realizer.realize(pkg_root, root_dir, manifest.package.id.asText(), root_dep_map) catch |err| {
+        try writeStderrFmt(io, "error: failed to realize root package: {s}\n", .{@errorName(err)});
+        return error.RealizeFailed;
+    };
+
+    // Run `zig build` in the root workspace dir.
+    const argv: []const []const u8 = switch (mode) {
+        .build, .build_with_tests => &.{ "zig", "build" },
+        .run_tests => &.{ "zig", "build", "test" },
+    };
+
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout_file: std.Io.File.Writer = .init(.stdout(), io, &stdout_buf);
+    const stdout = &stdout_file.interface;
+    try stdout.print("[build] {s} (root)\n", .{manifest.package.id.asText()});
+    try stdout.flush();
+
+    var child = try std.process.spawn(io, .{
+        .argv = argv,
+        .cwd = .{ .path = root_dir },
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    });
+    const term = try child.wait(io);
+    switch (term) {
+        .exited => |code| {
+            if (code != 0) {
+                try writeStderrFmt(io, "error: build failed for root package (exit code {d})\n", .{code});
+                return error.BuildFailed;
+            }
+        },
+        else => {
+            try writeStderrFmt(io, "error: build process for root package terminated abnormally\n", .{});
+            return error.BuildFailed;
+        },
+    }
+
+    try stdout.print("[done]  {s} (root)\n", .{manifest.package.id.asText()});
+    try stdout.flush();
+
+    // Symlink <pkg_root>/zig-out → <root_dir>/zig-out for easy access.
+    const zig_out_target = try std.Io.Dir.path.join(allocator, &.{ root_dir, "zig-out" });
+    defer allocator.free(zig_out_target);
+    const zig_out_link = try std.Io.Dir.path.join(allocator, &.{ pkg_root, "zig-out" });
+    defer allocator.free(zig_out_link);
+
+    // Remove any existing entry at the link path before (re)creating.
+    std.Io.Dir.cwd().deleteFile(io, zig_out_link) catch {};
+    std.Io.Dir.symLinkAbsolute(io, zig_out_target, zig_out_link, .{}) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => try writeStderrFmt(io, "warning: could not symlink zig-out: {s}\n", .{@errorName(err)}),
+    };
 }
 
 fn writeStderr(io: std.Io, text: []const u8) !void {
