@@ -28,6 +28,5 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
         return error.InvalidArgument;
     };
 
-    // P07-C stub: mode is passed through but not yet acted upon; zig build test is not yet invoked
     try build_cmd.runBuild(root, .run_tests, io);
 }

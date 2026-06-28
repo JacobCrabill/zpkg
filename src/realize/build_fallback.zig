@@ -8,6 +8,8 @@ pub const BuildMode = enum { build, build_with_tests, run_tests };
 
 pub const BuildPlan = struct {
     allocator: std.mem.Allocator,
+    /// Build mode for this plan (propagated to the executor).
+    mode: BuildMode,
     /// Ordered list of instance key strings (dependency-first, leaves first).
     build_order: [][]u8,
     /// Instance keys already satisfied by the store.
@@ -39,8 +41,6 @@ pub fn planBuild(
     store: *store_mod.Store,
     mode: BuildMode,
 ) !BuildPlan {
-    _ = mode; // TODO(P07-C): differentiate build vs build_with_tests vs run_tests
-
     var order: std.ArrayList([]u8) = .empty;
     errdefer {
         for (order.items) |k| allocator.free(k);
@@ -93,6 +93,7 @@ pub fn planBuild(
 
     return .{
         .allocator = allocator,
+        .mode = mode,
         .build_order = try order.toOwnedSlice(allocator),
         .store_hits = store_hits,
         .store_misses = store_misses,
@@ -189,9 +190,15 @@ pub const BuildExecutor = struct {
         var stdout_file: std.Io.File.Writer = .init(.stdout(), self.io, &stdout_buf);
         const stdout = &stdout_file.interface;
 
+        var any_test_failed = false;
+
         for (plan.build_order) |key| {
             if (plan.store_hits.contains(key)) {
-                try stdout.print("[hit]  {s}\n", .{key});
+                if (plan.mode == .run_tests) {
+                    try stdout.print("[skip] {s} (pre-built; no test binary)\n", .{key});
+                } else {
+                    try stdout.print("[hit]  {s}\n", .{key});
+                }
                 try stdout.flush();
                 continue;
             }
@@ -209,11 +216,21 @@ pub const BuildExecutor = struct {
             try stdout.print("[build] {s}\n", .{key});
             try stdout.flush();
 
-            try self.buildInstance(instance, key, lockfile);
+            self.buildInstance(instance, key, lockfile, plan.mode) catch |err| {
+                if (err == error.TestsFailed) {
+                    any_test_failed = true;
+                    try stdout.print("[fail]  {s} (tests failed)\n", .{key});
+                    try stdout.flush();
+                    continue;
+                }
+                return err;
+            };
 
             try stdout.print("[done]  {s}\n", .{key});
             try stdout.flush();
         }
+
+        if (any_test_failed) return error.TestsFailed;
     }
 
     fn buildInstance(
@@ -221,6 +238,7 @@ pub const BuildExecutor = struct {
         instance: *const model.lockfile.Instance,
         key: []const u8,
         lockfile: model.Lockfile,
+        mode: BuildMode,
     ) !void {
         const allocator = self.allocator;
 
@@ -371,6 +389,30 @@ pub const BuildExecutor = struct {
         // freed by the defer blocks above when this function exits.
         _ = lockfile; // suppress unused warning
         try self.store.storeArtifact(key, staging_dir, artifact_manifest);
+
+        // When running in test mode, execute `zig build test --prefix <staging_dir>` as well.
+        if (mode == .run_tests) {
+            var test_child = try std.process.spawn(self.io, .{
+                .argv = &.{ "zig", "build", "test", "--prefix", staging_dir },
+                .cwd = .{ .path = realized_dir },
+                .stdin = .inherit,
+                .stdout = .inherit,
+                .stderr = .inherit,
+            });
+            const test_term = try test_child.wait(self.io);
+            switch (test_term) {
+                .exited => |code| {
+                    if (code != 0) {
+                        try printStderr(self.io, "error: tests failed for '{s}' (exit code {d})\n", .{ key, code });
+                        return error.TestsFailed;
+                    }
+                },
+                else => {
+                    try printStderr(self.io, "error: test process for '{s}' terminated abnormally\n", .{key});
+                    return error.TestsFailed;
+                },
+            }
+        }
     }
 };
 
