@@ -53,13 +53,18 @@ pub fn planExport(
             }
         }
 
-        // For named target, filter by package_id.
+        // For named target, filter by package_id and target_name.
         switch (opts.target) {
             .package => {},
             .named => |named| {
-                // Filter by package_id. TODO: also filter by target_name once
-                // LockfileInstance carries per-target metadata (not in current model).
                 if (!std.mem.eql(u8, instance.package_id.asText(), named.package_id)) continue;
+                // Filter by target_name if the instance carries one.
+                if (named.target_name.len > 0) {
+                    if (instance.target_name) |tn| {
+                        if (!std.mem.eql(u8, tn, named.target_name)) continue;
+                    }
+                    // If instance.target_name is null, include it (backwards compat).
+                }
             },
         }
 
@@ -323,4 +328,82 @@ test "planExport: include_tests includes test-suffixed instances" {
     }
 
     try std.testing.expectEqual(@as(usize, 2), keys.len);
+}
+
+test "planExport: named target filters by target_name" {
+    const allocator = std.testing.allocator;
+    const model_pkg = @import("../model/root.zig");
+
+    // Two instances for the same package_id but different target_names.
+    // planExport with named target "lib" should return only instance[0].
+    const pid = try model_pkg.PackageId.parse("zpkg.example.multi");
+
+    const instances = try allocator.alloc(model_pkg.LockfileInstance, 2);
+    defer allocator.free(instances);
+
+    instances[0] = .{
+        .key = .{ .package_id = pid, .domain = .target },
+        .package_id = pid,
+        .domain = .target,
+        .version = .{ .major = 1, .minor = 0, .patch = 0, .revision = 0 },
+        .source_hash = "sha256:aaaa",
+        .selected_options = &.{},
+        .deps = &.{},
+        .target_name = "lib",
+    };
+    instances[1] = .{
+        .key = .{ .package_id = pid, .domain = .target },
+        .package_id = pid,
+        .domain = .target,
+        .version = .{ .major = 1, .minor = 0, .patch = 0, .revision = 0 },
+        .source_hash = "sha256:bbbb",
+        .selected_options = &.{},
+        .deps = &.{},
+        .target_name = "exe",
+    };
+
+    const lockfile: model_pkg.Lockfile = .{
+        .schema = 1,
+        .root = .{
+            .package_id = pid,
+            .version = .{ .major = 1, .minor = 0, .patch = 0, .revision = 0 },
+        },
+        .generated_by = null,
+        .instances = instances,
+    };
+
+    // Filter by target_name "lib" — should match only instances[0].
+    const keys = try planExport(allocator, lockfile, .{
+        .target = .{ .named = .{ .package_id = "zpkg.example.multi", .target_name = "lib" } },
+    });
+    defer {
+        for (keys) |k| allocator.free(k);
+        allocator.free(keys);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), keys.len);
+    try std.testing.expectEqualStrings("zpkg.example.multi#target", keys[0]);
+
+    // Filter by target_name "exe" — should match only instances[1].
+    const keys2 = try planExport(allocator, lockfile, .{
+        .target = .{ .named = .{ .package_id = "zpkg.example.multi", .target_name = "exe" } },
+    });
+    defer {
+        for (keys2) |k| allocator.free(k);
+        allocator.free(keys2);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), keys2.len);
+    try std.testing.expectEqualStrings("zpkg.example.multi#target", keys2[0]);
+
+    // Filter with empty target_name — should match both (backwards compat).
+    const keys3 = try planExport(allocator, lockfile, .{
+        .target = .{ .named = .{ .package_id = "zpkg.example.multi", .target_name = "" } },
+    });
+    defer {
+        for (keys3) |k| allocator.free(k);
+        allocator.free(keys3);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), keys3.len);
 }

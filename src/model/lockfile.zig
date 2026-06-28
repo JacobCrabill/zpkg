@@ -75,10 +75,14 @@ pub const Instance = struct {
     source_hash: []const u8,
     selected_options: []model.NamedOptionValue,
     deps: []Dependency,
+    /// The name of the specific build target within the package, if known.
+    /// Null for packages resolved at package+domain granularity (current MVP).
+    target_name: ?[]const u8 = null,
 
     pub fn deinit(self: Instance, allocator: std.mem.Allocator) void {
         self.key.deinitOwned(allocator);
         self.package_id.deinitOwned(allocator);
+        if (self.target_name) |tn| allocator.free(tn);
         allocator.free(self.source_hash);
         for (self.selected_options) |entry| {
             allocator.free(entry.name);
