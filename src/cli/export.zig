@@ -2,6 +2,7 @@ const std = @import("std");
 const schema = @import("../schema/root.zig");
 const store_mod = @import("../store/store.zig");
 const export_engine = @import("../export/export.zig");
+const diag_util = @import("../util/diag.zig");
 
 pub fn run(args: []const []const u8, io: std.Io) !void {
     // Usage: zpkg export <pkg-root> [<package_id>:<target_name>]
@@ -29,9 +30,15 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    const abs_root = diag_util.resolveAbsPath(allocator, root) catch |err| {
+        try writeStderrFmt(io, "error: cannot resolve path '{s}': {s}\n", .{ root, @errorName(err) });
+        return error.InvalidArgument;
+    };
+    defer allocator.free(abs_root);
+
     // Load lockfile bytes.
-    var pkg_dir = std.Io.Dir.openDirAbsolute(io, root, .{}) catch |err| {
-        try writeStderrFmt(io, "error: cannot open package root '{s}': {s}\n", .{ root, @errorName(err) });
+    var pkg_dir = std.Io.Dir.openDirAbsolute(io, abs_root, .{}) catch |err| {
+        try writeStderrFmt(io, "error: cannot open package root '{s}': {s}\n", .{ abs_root, @errorName(err) });
         return error.InvalidArgument;
     };
     defer pkg_dir.close(io);
@@ -69,7 +76,7 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     }
 
     // Init store.
-    var store = try store_mod.Store.init(allocator, io, root);
+    var store = try store_mod.Store.init(allocator, io, abs_root);
     defer store.deinit();
 
     // Plan export.
@@ -80,7 +87,7 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     }
 
     // Destination: <pkg-root>/.zpkg/export/bundle/
-    const dest_dir = try std.Io.Dir.path.join(allocator, &.{ root, ".zpkg", "export", "bundle" });
+    const dest_dir = try std.Io.Dir.path.join(allocator, &.{ abs_root, ".zpkg", "export", "bundle" });
     defer allocator.free(dest_dir);
 
     // Print plan.

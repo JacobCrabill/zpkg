@@ -1,6 +1,18 @@
 /// Structured diagnostic helpers for CLI commands.
 const std = @import("std");
 
+/// Resolve a user-supplied path (relative or absolute) to an
+/// allocator-owned absolute path. Caller must free the result.
+pub fn resolveAbsPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    if (std.fs.path.isAbsolute(path)) return allocator.dupe(u8, path);
+    // getcwd syscall — portable within Linux/POSIX targets.
+    var cwd_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const rc = std.os.linux.getcwd(&cwd_buf, cwd_buf.len);
+    if (std.os.linux.errno(rc) != .SUCCESS) return error.GetCwdFailed;
+    const cwd = std.mem.sliceTo(&cwd_buf, 0);
+    return std.Io.Dir.path.join(allocator, &.{ cwd, path });
+}
+
 pub fn writeError(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
     var buf: [4096]u8 = undefined;
     var wf: std.Io.File.Writer = .init(.stderr(), io, &buf);

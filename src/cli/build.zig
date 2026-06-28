@@ -3,6 +3,7 @@ const schema = @import("../schema/root.zig");
 const realize = @import("../realize/root.zig");
 const build_fallback = @import("../realize/build_fallback.zig");
 const store_mod = @import("../store/store.zig");
+const diag = @import("../util/diag.zig");
 
 pub fn run(args: []const []const u8, io: std.Io) !void {
     var with_tests = false;
@@ -35,9 +36,16 @@ pub fn runBuild(pkg_root: []const u8, mode: build_fallback.BuildMode, io: std.Io
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    // Resolve to absolute so openDirAbsolute and downstream path joins work.
+    const abs_root = diag.resolveAbsPath(allocator, pkg_root) catch |err| {
+        try writeStderrFmt(io, "error: cannot resolve path '{s}': {s}\n", .{ pkg_root, @errorName(err) });
+        return error.InvalidArgument;
+    };
+    defer allocator.free(abs_root);
+
     // Open pkg-root dir.
-    var pkg_dir = std.Io.Dir.openDirAbsolute(io, pkg_root, .{}) catch |err| {
-        try writeStderrFmt(io, "error: cannot open package root '{s}': {s}\n", .{ pkg_root, @errorName(err) });
+    var pkg_dir = std.Io.Dir.openDirAbsolute(io, abs_root, .{}) catch |err| {
+        try writeStderrFmt(io, "error: cannot open package root '{s}': {s}\n", .{ abs_root, @errorName(err) });
         return error.InvalidArgument;
     };
     defer pkg_dir.close(io);
@@ -79,12 +87,12 @@ pub fn runBuild(pkg_root: []const u8, mode: build_fallback.BuildMode, io: std.Io
 
     // Init WorkspaceLayout.
     const profile = realize.workspace.defaultProfile();
-    var layout = try realize.WorkspaceLayout.init(allocator, pkg_root, profile);
+    var layout = try realize.WorkspaceLayout.init(allocator, abs_root, profile);
     defer layout.deinit();
     try layout.ensureDirs(io);
 
     // Init Store.
-    var store = try store_mod.Store.init(allocator, io, pkg_root);
+    var store = try store_mod.Store.init(allocator, io, abs_root);
     defer store.deinit();
 
     // Plan the build.
@@ -103,7 +111,7 @@ pub fn runBuild(pkg_root: []const u8, mode: build_fallback.BuildMode, io: std.Io
     try stdout.flush();
 
     // Execute plan.
-    var executor = build_fallback.BuildExecutor.init(allocator, io, &store, &layout, pkg_root);
+    var executor = build_fallback.BuildExecutor.init(allocator, io, &store, &layout, abs_root);
     defer executor.deinit();
 
     try executor.execute(plan, lockfile);

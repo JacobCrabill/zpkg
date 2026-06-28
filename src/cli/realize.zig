@@ -2,6 +2,7 @@ const std = @import("std");
 const schema = @import("../schema/root.zig");
 const realize = @import("../realize/root.zig");
 const store_mod = @import("../store/store.zig");
+const diag_util = @import("../util/diag.zig");
 
 pub fn run(args: []const []const u8, io: std.Io) !void {
     if (args.len != 3) {
@@ -12,7 +13,13 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     }
 
     const allocator = std.heap.page_allocator;
-    const pkg_root = args[2];
+
+    const abs_root = diag_util.resolveAbsPath(allocator, args[2]) catch |err| {
+        try writeStderrFmt(io, "error: cannot resolve path '{s}': {s}\n", .{ args[2], @errorName(err) });
+        return error.InvalidArgument;
+    };
+    defer allocator.free(abs_root);
+    const pkg_root = abs_root;
 
     // 1. Open pkg-root dir
     var pkg_dir = std.Io.Dir.openDirAbsolute(io, pkg_root, .{}) catch |err| {

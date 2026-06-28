@@ -62,10 +62,18 @@ pub const WorkspaceLayout = struct {
 };
 
 fn ensureDirAbsolute(io: std.Io, path: []const u8) !void {
-    std.Io.Dir.createDirAbsolute(io, path, .default_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
+    // Walk each component and mkdir one level at a time so that missing
+    // intermediate directories (e.g. .zpkg/work) are created automatically.
+    var i: usize = 1; // skip leading '/'
+    while (i <= path.len) : (i += 1) {
+        if (i == path.len or path[i] == '/') {
+            const component = path[0..i];
+            std.Io.Dir.createDirAbsolute(io, component, .default_dir) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => return err,
+            };
+        }
+    }
 }
 
 test "WorkspaceLayout derives correct paths" {
