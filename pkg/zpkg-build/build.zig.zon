@@ -1,0 +1,6 @@
+.{
+    .name = .zpkg_build,
+    .version = "0.1.0",
+    .fingerprint = 0xb788cf90e91466d7,
+    .paths = .{"."},
+}

@@ -1,0 +1,49 @@
+.{
+    .schema = 1,
+    .package = "zpkg.example.hello_lib",
+    .domain = .target,
+    .version = "0.1.0.0",
+    .selected_options = .{
+        .shared = "true",
+    },
+    .dep_alias_mapping = .{},
+    .targets = .{
+        .hello = .{
+            .kind = .library,
+            .linkage = .dynamic,
+            .exported = true,
+            .edges = .{},
+            .include_dirs = .{
+                .{ .path = "include", .visibility = .public },
+            },
+            .compile_defs = .{},
+            .artifacts = .{
+                "libhello.so",
+            },
+            .system_libs = .{},
+            .resources = .{},
+        },
+        .hello_assets = .{
+            .kind = .resource_set,
+            .linkage = .default,
+            .exported = true,
+            .edges = .{},
+            .include_dirs = .{},
+            .compile_defs = .{},
+            .artifacts = .{},
+            .system_libs = .{},
+            .resources = .{},
+        },
+        .hello_headers = .{
+            .kind = .headers,
+            .linkage = .default,
+            .exported = true,
+            .edges = .{},
+            .include_dirs = .{},
+            .compile_defs = .{},
+            .artifacts = .{},
+            .system_libs = .{},
+            .resources = .{},
+        },
+    },
+}
