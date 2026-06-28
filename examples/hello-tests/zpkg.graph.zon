@@ -1,0 +1,29 @@
+.{
+    .schema = 1,
+    .package = "zpkg.example.hello_tests",
+    .domain = .target,
+    .version = "0.1.0.0",
+    .selected_options = .{
+        .build_tests = "true",
+    },
+    .dep_alias_mapping = .{
+        .hello_lib = "zpkg.example.hello_lib",
+        .hello_tool = "zpkg.example.hello_tool",
+    },
+    .targets = .{
+        .hello_tests = .{
+            .kind = .executable,
+            .linkage = .default,
+            .exported = true,
+            .edges = .{
+                .{ .dep_alias = "hello_lib", .target_name = "hello", .role = .test_dep },
+                .{ .dep_alias = "hello_tool", .target_name = "hello_tool", .role = .tool },
+            },
+            .include_dirs = .{},
+            .compile_defs = .{},
+            .artifacts = .{},
+            .system_libs = .{},
+            .resources = .{},
+        },
+    },
+}

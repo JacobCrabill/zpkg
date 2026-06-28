@@ -1,0 +1,11 @@
+.{
+    .schema = 1,
+
+    .root = .{
+        .package = "zpkg.example.hello_lib",
+        .version = "0.1.0.0",
+    },
+
+    .instances = .{
+    },
+}

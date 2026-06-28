@@ -1,0 +1,23 @@
+.{
+    .schema = 1,
+    .package = "zpkg.example.hello_tool",
+    .domain = .target,
+    .version = "0.1.0.0",
+    .selected_options = .{},
+    .dep_alias_mapping = .{},
+    .targets = .{
+        .hello_tool = .{
+            .kind = .executable,
+            .linkage = .default,
+            .exported = true,
+            .edges = .{},
+            .include_dirs = .{},
+            .compile_defs = .{},
+            .artifacts = .{
+                "hello-tool",
+            },
+            .system_libs = .{},
+            .resources = .{},
+        },
+    },
+}
