@@ -1,0 +1,12 @@
+.{
+    .name = .diamond_libe,
+    .version = "0.1.0",
+    .fingerprint = 0x4f908407f1973f57,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .@"zpkg-build" = .{ .path = "../../../pkg/zpkg-build" },
+        .libC = .{ .path = "../libC" },
+        .libD = .{ .path = "../libD" },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "zpkg.zon", "src", "include" },
+}

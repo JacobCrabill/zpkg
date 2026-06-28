@@ -1,0 +1,25 @@
+.{
+    .schema = 1,
+    .package = "diamond.libA",
+    .domain = .target,
+    .version = "0.1.0.0",
+    .selected_options = .{},
+    .dep_alias_mapping = .{},
+    .targets = .{
+        .libA = .{
+            .kind = .library,
+            .linkage = .static,
+            .exported = true,
+            .edges = .{},
+            .include_dirs = .{
+                .{ .path = "include", .visibility = .public },
+            },
+            .compile_defs = .{},
+            .artifacts = .{
+                "libA.a",
+            },
+            .system_libs = .{},
+            .resources = .{},
+        },
+    },
+}

@@ -1,0 +1,17 @@
+.{
+    .schema = 1,
+
+    .package = .{
+        .name = "libA",
+        .id = "diamond.libA",
+        .version = "0.1.0.0",
+        .backend = .zig,
+    },
+
+    .targets = .{
+        .libA = .{
+            .kind = .library,
+            .linkage = .static,
+        },
+    },
+}

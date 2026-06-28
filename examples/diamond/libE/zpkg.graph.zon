@@ -1,0 +1,31 @@
+.{
+    .schema = 1,
+    .package = "diamond.libE",
+    .domain = .target,
+    .version = "0.1.0.0",
+    .selected_options = .{},
+    .dep_alias_mapping = .{
+        .libC = "diamond.libC",
+        .libD = "diamond.libD",
+    },
+    .targets = .{
+        .libE = .{
+            .kind = .library,
+            .linkage = .static,
+            .exported = true,
+            .edges = .{
+                .{ .dep_alias = "libC", .target_name = "libC", .role = .link },
+                .{ .dep_alias = "libD", .target_name = "libD", .role = .link },
+            },
+            .include_dirs = .{
+                .{ .path = "include", .visibility = .public },
+            },
+            .compile_defs = .{},
+            .artifacts = .{
+                "libE.a",
+            },
+            .system_libs = .{},
+            .resources = .{},
+        },
+    },
+}

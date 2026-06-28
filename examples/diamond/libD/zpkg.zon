@@ -1,0 +1,28 @@
+.{
+    .schema = 1,
+
+    .package = .{
+        .name = "libD",
+        .id = "diamond.libD",
+        .version = "0.1.0.0",
+        .backend = .zig,
+    },
+
+    .deps = .{
+        .libA = .{
+            .package = "diamond.libA",
+            .require = .{ .version = "=0.1.0.0" },
+        },
+        .libB = .{
+            .package = "diamond.libB",
+            .require = .{ .version = "=0.1.0.0" },
+        },
+    },
+
+    .targets = .{
+        .libD = .{
+            .kind = .library,
+            .linkage = .static,
+        },
+    },
+}

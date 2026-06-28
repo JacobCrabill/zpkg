@@ -1,0 +1,27 @@
+.{
+    .schema = 1,
+    .package = "diamond.app",
+    .domain = .target,
+    .version = "0.1.0.0",
+    .selected_options = .{},
+    .dep_alias_mapping = .{
+        .libE = "diamond.libE",
+    },
+    .targets = .{
+        .app = .{
+            .kind = .executable,
+            .linkage = .default,
+            .exported = true,
+            .edges = .{
+                .{ .dep_alias = "libE", .target_name = "libE", .role = .link },
+            },
+            .include_dirs = .{},
+            .compile_defs = .{},
+            .artifacts = .{
+                "app",
+            },
+            .system_libs = .{},
+            .resources = .{},
+        },
+    },
+}

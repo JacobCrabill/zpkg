@@ -1,0 +1,23 @@
+.{
+    .schema = 1,
+
+    .package = .{
+        .name = "app",
+        .id = "diamond.app",
+        .version = "0.1.0.0",
+        .backend = .zig,
+    },
+
+    .deps = .{
+        .libE = .{
+            .package = "diamond.libE",
+            .require = .{ .version = "=0.1.0.0" },
+        },
+    },
+
+    .targets = .{
+        .app = .{
+            .kind = .executable,
+        },
+    },
+}
