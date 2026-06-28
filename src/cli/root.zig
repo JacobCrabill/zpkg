@@ -3,12 +3,14 @@ const inspect = @import("inspect.zig");
 const lock = @import("lock.zig");
 const update = @import("update.zig");
 const realize_cmd = @import("realize.zig");
+const build_cmd = @import("build.zig");
+const test_cmd = @import("test_cmd.zig");
 const workspace = @import("../util/workspace.zig");
 
 pub const help_text =
     \\zpkg - Zig package workspace realizer
     \\
-    \\Status: package schema, resolution, and lockfile authority implemented.
+    \\Status: package schema, resolution, lockfile authority, and source-build fallback implemented.
     \\
     \\Usage:
     \\  zpkg [command]
@@ -20,8 +22,8 @@ pub const help_text =
     \\  lock      Create an authoritative lockfile
     \\  update    Update the authoritative lockfile
     \\  realize   Materialize a generated workspace
-    \\  build     Build from an authoritative lockfile (placeholder)
-    \\  test      Build and run the test graph (placeholder)
+    \\  build     Build from an authoritative lockfile
+    \\  test      Build and run the test graph
     \\  export    Export a relocatable closure bundle (placeholder)
     \\
     \\Generated workspace root: .zpkg/
@@ -41,6 +43,10 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
         return update.run(args, io);
     } else if (std.mem.eql(u8, args[1], "realize")) {
         return realize_cmd.run(args, io);
+    } else if (std.mem.eql(u8, args[1], "build")) {
+        return build_cmd.run(args, io);
+    } else if (std.mem.eql(u8, args[1], "test")) {
+        return test_cmd.run(args, io);
     }
 
     return writeUnknownCommand(io, args[1]);
