@@ -2,6 +2,7 @@ const std = @import("std");
 const inspect = @import("inspect.zig");
 const lock = @import("lock.zig");
 const update = @import("update.zig");
+const realize_cmd = @import("realize.zig");
 const workspace = @import("../util/workspace.zig");
 
 pub const help_text =
@@ -18,7 +19,7 @@ pub const help_text =
     \\  graph     Show resolved package graph (placeholder)
     \\  lock      Create an authoritative lockfile
     \\  update    Update the authoritative lockfile
-    \\  realize   Materialize a generated workspace (placeholder)
+    \\  realize   Materialize a generated workspace
     \\  build     Build from an authoritative lockfile (placeholder)
     \\  test      Build and run the test graph (placeholder)
     \\  export    Export a relocatable closure bundle (placeholder)
@@ -38,6 +39,8 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
         return lock.run(args, io);
     } else if (std.mem.eql(u8, args[1], "update")) {
         return update.run(args, io);
+    } else if (std.mem.eql(u8, args[1], "realize")) {
+        return realize_cmd.run(args, io);
     }
 
     return writeUnknownCommand(io, args[1]);
