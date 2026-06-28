@@ -1,30 +1,31 @@
 const std = @import("std");
 const inspect = @import("inspect.zig");
+const graph_cmd = @import("graph.zig");
 const lock = @import("lock.zig");
 const update = @import("update.zig");
 const realize_cmd = @import("realize.zig");
 const build_cmd = @import("build.zig");
 const test_cmd = @import("test_cmd.zig");
+const export_cmd = @import("export.zig");
 const workspace = @import("../util/workspace.zig");
 
 pub const help_text =
     \\zpkg - Zig package workspace realizer
     \\
-    \\Status: package schema, resolution, lockfile authority, and source-build fallback implemented.
-    \\
     \\Usage:
     \\  zpkg [command]
     \\  zpkg --help
+    \\  zpkg <command> --help
     \\
     \\Commands:
     \\  inspect   Inspect package metadata from <pkg-root>/zpkg.zon
-    \\  graph     Show resolved package graph (placeholder)
+    \\  graph     Show resolved package graph from <pkg-root>/zpkg.lock.zon
     \\  lock      Create an authoritative lockfile
     \\  update    Update the authoritative lockfile
     \\  realize   Materialize a generated workspace
     \\  build     Build from an authoritative lockfile
     \\  test      Build and run the test graph
-    \\  export    Export a relocatable closure bundle (placeholder)
+    \\  export    Export a relocatable closure bundle
     \\
     \\Generated workspace root: .zpkg/
     \\
@@ -37,6 +38,8 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
 
     if (std.mem.eql(u8, args[1], "inspect")) {
         return inspect.run(args, io);
+    } else if (std.mem.eql(u8, args[1], "graph")) {
+        return graph_cmd.run(args, io);
     } else if (std.mem.eql(u8, args[1], "lock")) {
         return lock.run(args, io);
     } else if (std.mem.eql(u8, args[1], "update")) {
@@ -47,6 +50,8 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
         return build_cmd.run(args, io);
     } else if (std.mem.eql(u8, args[1], "test")) {
         return test_cmd.run(args, io);
+    } else if (std.mem.eql(u8, args[1], "export")) {
+        return export_cmd.run(args, io);
     }
 
     return writeUnknownCommand(io, args[1]);
