@@ -87,6 +87,10 @@ pub const SourcePkgRealize = struct {
     }
 
     /// Generate the build.zig.zon content.  Caller owns the returned slice.
+    ///
+    /// Determinism guarantee: dependency entries are emitted in lexicographic
+    /// order of the dep name key.  HashMap iteration order is NOT used directly
+    /// because it is not stable across runs.
     pub fn generateBuildZigZon(
         self: *SourcePkgRealize,
         pkg_name: []const u8,
@@ -103,11 +107,25 @@ pub const SourcePkgRealize = struct {
         try w.writeAll("    .paths = .{\".\"},\n");
         try w.writeAll("    .dependencies = .{\n");
 
-        var iter = dep_realized_paths.iterator();
-        while (iter.next()) |entry| {
-            const rel_path = try relativePath(self.allocator, dest_dir, entry.value_ptr.*);
+        // Collect and sort dep keys to guarantee stable output regardless of
+        // HashMap insertion or iteration order.
+        var keys = std.ArrayList([]const u8).empty;
+        defer keys.deinit(self.allocator);
+        var key_iter = dep_realized_paths.keyIterator();
+        while (key_iter.next()) |k| {
+            try keys.append(self.allocator, k.*);
+        }
+        std.mem.sort([]const u8, keys.items, {}, struct {
+            fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.order(u8, a, b) == .lt;
+            }
+        }.lessThan);
+
+        for (keys.items) |key| {
+            const value = dep_realized_paths.get(key).?;
+            const rel_path = try relativePath(self.allocator, dest_dir, value);
             defer self.allocator.free(rel_path);
-            try w.print("        .{s} = .{{ .path = \"{s}\" }},\n", .{ entry.key_ptr.*, rel_path });
+            try w.print("        .{s} = .{{ .path = \"{s}\" }},\n", .{ key, rel_path });
         }
 
         try w.writeAll("    },\n");
@@ -186,6 +204,43 @@ test "generateBuildZigZon produces correct content" {
     try std.testing.expect(std.mem.indexOf(u8, content, ".paths = .{\".\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "hello_lib") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, ".path =") != null);
+}
+
+test "generateBuildZigZon output is deterministic with multiple deps" {
+    // Two maps with the same entries inserted in opposite order must produce
+    // identical ZON output.  This verifies that we sort before emitting.
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const dest = "/project/.zpkg/work/debug-native/root";
+    const dep_a_path = "/project/.zpkg/work/debug-native/deps/zpkg.example.alpha";
+    const dep_b_path = "/project/.zpkg/work/debug-native/deps/zpkg.example.beta";
+
+    var map1 = DepPathMap.init(allocator);
+    defer map1.deinit();
+    try map1.put("alpha", dep_a_path);
+    try map1.put("beta", dep_b_path);
+
+    var map2 = DepPathMap.init(allocator);
+    defer map2.deinit();
+    // Insert in reverse order — if we relied on HashMap order, outputs would differ.
+    try map2.put("beta", dep_b_path);
+    try map2.put("alpha", dep_a_path);
+
+    var r1 = SourcePkgRealize.init(allocator, io);
+    const out1 = try r1.generateBuildZigZon("mypkg", dest, map1);
+    defer allocator.free(out1);
+
+    var r2 = SourcePkgRealize.init(allocator, io);
+    const out2 = try r2.generateBuildZigZon("mypkg", dest, map2);
+    defer allocator.free(out2);
+
+    try std.testing.expectEqualStrings(out1, out2);
+
+    // Also verify alpha appears before beta in the output.
+    const alpha_pos = std.mem.indexOf(u8, out1, "alpha").?;
+    const beta_pos = std.mem.indexOf(u8, out1, "beta").?;
+    try std.testing.expect(alpha_pos < beta_pos);
 }
 
 test "relativePath computes sibling path" {
