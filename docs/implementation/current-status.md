@@ -1,6 +1,6 @@
 # Current Implementation Status
 
-_Last updated by Manager: 2026-06-28_
+_Last updated by Manager: 2026-06-28 (Phases 08/09/10 complete)_
 
 ## Source of truth
 
@@ -24,8 +24,8 @@ This file should track the **current exact state**, not an idealized plan.
 ## Repository state
 
 - Branch: `main`
-- HEAD: `0458182`
-- HEAD summary: `Implement Phase 07: source-build fallback pipeline`
+- HEAD: `a3acd3d`
+- HEAD summary: `Implement Phase 08: graph introspection and CLI polish`
 - Working tree: clean
 
 ### Relevant stash entries
@@ -46,9 +46,9 @@ This file should track the **current exact state**, not an idealized plan.
 | Phase 05 - `zpkg-build` and graph emission | Approved and merged | Package API, emit, validate, hello-lib migrated; reviewed and fixed |
 | Phase 06 - Workspace realization | Approved and merged | WorkspaceLayout, source symlink-forest, binary adapter, realize CLI |
 | Phase 07 - Build fallback pipeline | Approved and merged | Topo planner, executor, zpkg build/test CLI; reviewed and fixed |
-| Phase 08 - CLI and UX | Partial | `inspect`, `lock`, `update` exist; broader CLI remains incomplete |
-| Phase 09 - Export and relocation | Not started | Waiting on Phase 07 |
-| Phase 10 - Reproducibility and CI | Not started | Waiting on Phases 07/09 |
+| Phase 08 - CLI and UX | Approved and merged | graph command, diag helpers, CLI polish, quickstart doc |
+| Phase 09 - Export and relocation | Approved and merged | planExport, assembleBundle, collision policy, zpkg export CLI |
+| Phase 10 - Reproducibility and CI | Approved and merged | determinism sort fix, reproducibility doc, CI workflow |
 
 ---
 
@@ -107,13 +107,12 @@ This file should track the **current exact state**, not an idealized plan.
 
 ## Current active / unresolved work
 
-### Phase 08 / 09 / 10 - Remaining phases
+All planned phases (00–10) are complete and merged. Known stubs and deferred work:
 
-**Status:** all unblocked
-
-- Phase 08 (CLI and UX): `zpkg graph`, `zpkg export` CLI polish — can run now
-- Phase 09 (Export and relocation): `src/cli/export.zig`, `src/export/export.zig`
-- Phase 10 (Reproducibility and CI): deterministic workspace + CI workflows
+- **P07-C**: `zpkg test` delegates to `runBuild(.run_tests)` but does not yet invoke `zig build test` per instance
+- **Example migration**: `hello-headers`, `hello-tool`, `hello-app`, `hello-tests` not yet migrated to `zpkg-build`
+- **Named-target export**: `target_name` filter in `planExport` deferred until `LockfileInstance` carries per-target metadata
+- **`generateBuildZigZon` quoting**: dep names with non-identifier chars (hyphens, dots) need quoting in emitted ZON
 
 ---
 
@@ -156,10 +155,10 @@ None currently. Phase 03 is merged. Phases 04/05 parallel window is open.
 
 Milestone A (Schemas, hashes, resolution) is complete. Milestone B (Store, wrappers, realization) is complete. Milestone C (End-to-end build) is complete.
 
-Start Milestone D — Phases 08/09/10 in parallel:
-- Phase 08: `zpkg graph` command + CLI polish
-- Phase 09: `zpkg export` relocatable closure bundles
-- Phase 10: reproducibility documentation and CI workflows
+All milestones complete. Remaining work is optional follow-up:
+- Implement `zpkg test` per-instance `zig build test` invocation (P07-C stub)
+- Migrate remaining examples to `zpkg-build`
+- Add quoting for non-identifier dep names in `generateBuildZigZon`
 
 ---
 
