@@ -125,7 +125,11 @@ pub const SourcePkgRealize = struct {
             const value = dep_realized_paths.get(key).?;
             const rel_path = try relativePath(self.allocator, dest_dir, value);
             defer self.allocator.free(rel_path);
-            try w.print("        .{s} = .{{ .path = \"{s}\" }},\n", .{ key, rel_path });
+            if (isBareIdentifier(key)) {
+                try w.print("        .{s} = .{{ .path = \"{s}\" }},\n", .{ key, rel_path });
+            } else {
+                try w.print("        .@\"{s}\" = .{{ .path = \"{s}\" }},\n", .{ key, rel_path });
+            }
         }
 
         try w.writeAll("    },\n");
@@ -134,6 +138,38 @@ pub const SourcePkgRealize = struct {
         return try aw.toOwnedSlice();
     }
 };
+
+/// Returns true if `name` is a valid Zig bare identifier (no quoting needed).
+/// Rejects empty strings, names starting with digits, names containing
+/// non-alphanumeric/non-underscore characters, and Zig keywords.
+fn isBareIdentifier(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name, 0..) |c, i| {
+        const ok = switch (c) {
+            'a'...'z', 'A'...'Z', '_' => true,
+            '0'...'9' => i > 0,
+            else => false,
+        };
+        if (!ok) return false;
+    }
+    // Reject Zig keywords that would be invalid as bare field names.
+    const keywords = [_][]const u8{
+        "addrspace", "align",    "allowzero", "and",      "anyframe",
+        "anytype",   "asm",      "async",     "await",    "break",
+        "callconv",  "catch",    "comptime",  "const",    "continue",
+        "defer",     "else",     "enum",      "errdefer", "error",
+        "export",    "extern",   "fn",        "for",      "if",
+        "inline",    "linksection", "noalias", "noinline", "nosuspend",
+        "opaque",    "or",       "orelse",    "packed",   "pub",
+        "resume",    "return",   "struct",    "suspend",  "switch",
+        "test",      "threadlocal", "try",    "union",    "unreachable",
+        "usingnamespace", "var", "volatile",  "while",
+    };
+    for (keywords) |kw| {
+        if (std.mem.eql(u8, name, kw)) return false;
+    }
+    return true;
+}
 
 /// Compute a relative path from `from_dir` to `to_path`.
 /// Both must be absolute.  Caller owns the returned slice.
@@ -255,4 +291,42 @@ test "relativePath computes deeper path" {
     const rel = try relativePath(allocator, "/project/.zpkg/work/debug-native/root", "/project/.zpkg/work/debug-native/deps/mypkg");
     defer allocator.free(rel);
     try std.testing.expectEqualStrings("../deps/mypkg", rel);
+}
+
+test "generateBuildZigZon quotes dep names that are not bare identifiers" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const dest = "/project/.zpkg/work/debug-native/root";
+    var dep_map = DepPathMap.init(allocator);
+    defer dep_map.deinit();
+    try dep_map.put("hello-lib", "/project/.zpkg/work/debug-native/deps/hello-lib");
+    try dep_map.put("hello_lib", "/project/.zpkg/work/debug-native/deps/hello_lib");
+
+    var realizer = SourcePkgRealize.init(allocator, io);
+    const content = try realizer.generateBuildZigZon("mypkg", dest, dep_map);
+    defer allocator.free(content);
+
+    // hello-lib has a hyphen — must be wrapped with @"..."
+    try std.testing.expect(std.mem.indexOf(u8, content, ".@\"hello-lib\"") != null);
+    // hello_lib is a valid bare identifier — must NOT be wrapped
+    try std.testing.expect(std.mem.indexOf(u8, content, ".hello_lib") != null);
+    // Ensure the bare version is not accidentally emitted for the hyphenated name
+    try std.testing.expect(std.mem.indexOf(u8, content, ".hello-lib") == null);
+}
+
+test "isBareIdentifier rejects keywords and non-identifier chars" {
+    try std.testing.expect(isBareIdentifier("hello_lib") == true);
+    try std.testing.expect(isBareIdentifier("_private") == true);
+    try std.testing.expect(isBareIdentifier("hello-lib") == false);
+    try std.testing.expect(isBareIdentifier("hello.lib") == false);
+    try std.testing.expect(isBareIdentifier("") == false);
+    try std.testing.expect(isBareIdentifier("1bad") == false);
+    try std.testing.expect(isBareIdentifier("const") == false);
+    try std.testing.expect(isBareIdentifier("fn") == false);
+    try std.testing.expect(isBareIdentifier("pub") == false);
+    try std.testing.expect(isBareIdentifier("return") == false);
+    try std.testing.expect(isBareIdentifier("try") == false);
+    try std.testing.expect(isBareIdentifier("error") == false);
+    try std.testing.expect(isBareIdentifier("struct") == false);
 }
