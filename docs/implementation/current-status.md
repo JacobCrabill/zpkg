@@ -24,9 +24,9 @@ This file should track the **current exact state**, not an idealized plan.
 ## Repository state
 
 - Branch: `main`
-- HEAD: `926a907` (about to advance)
-- HEAD summary: `Update status: Phase 02 complete, Phase 03 is next`
-- Working tree: Phase 03 implementation complete, reviewed, all required findings fixed — ready to commit
+- HEAD: `80e1094`
+- HEAD summary: `Implement Phase 05: zpkg-build wrappers and graph emission`
+- Working tree: clean
 
 ### Relevant stash entries
 
@@ -42,9 +42,9 @@ This file should track the **current exact state**, not an idealized plan.
 | Phase 01 - Schema and model | Approved and merged | Includes `zpkg.zon`, lockfile, graph, and manifest parsing foundations, plus inspect command |
 | Phase 02 - Hashing and identity | Approved and merged | Toolchain + instance-key + source-hash complete |
 | Phase 03 - Resolution and lockfile | Approved and merged | Resolver core, drift detection, `lock`/`update` CLI complete; reviewed and fixed |
-| Phase 04 - Store and manifest mgmt | Not started | Waiting on Phase 03 |
-| Phase 05 - `zpkg-build` and graph emission | Not started | Waiting on Phase 03 |
-| Phase 06 - Workspace realization | Not started | Waiting on Phase 05 |
+| Phase 04 - Store and manifest mgmt | Approved and merged | Store layout, manifest, archive, Store facade; reviewed and fixed |
+| Phase 05 - `zpkg-build` and graph emission | Approved and merged | Package API, emit, validate, hello-lib migrated; reviewed and fixed |
+| Phase 06 - Workspace realization | Not started | Waiting on Phase 05 — now unblocked |
 | Phase 07 - Build fallback pipeline | Not started | Waiting on Phase 06 |
 | Phase 08 - CLI and UX | Partial | `inspect`, `lock`, `update` exist; broader CLI remains incomplete |
 | Phase 09 - Export and relocation | Not started | Waiting on Phase 07 |
@@ -107,14 +107,16 @@ This file should track the **current exact state**, not an idealized plan.
 
 ## Current active / unresolved work
 
-### Phase 04, 05, 06 - Next parallel window
+### Phase 06 - Workspace realization
 
-**Status:** unlocked by Phase 03 merge
+**Status:** unblocked, not started
 
-These lanes can now start:
-- `store-lane` (Phase 04 — local binary store and manifest management)
-- `wrapper-lane` (Phase 05 — `zpkg-build` helper package)
-- `cli-inspect-graph-lane` (Phase 08 partial — `zpkg graph` command)
+Next up: implement workspace realization engine:
+- `src/realize/workspace.zig`
+- `src/realize/source_pkg.zig`
+- `src/realize/binary_adapter.zig`
+
+Depends on Phase 04 (store) and Phase 05 (zpkg-build) — both now merged.
 
 ---
 
@@ -155,10 +157,10 @@ None currently. Phase 03 is merged. Phases 04/05 parallel window is open.
 
 ## Recommended immediate next actions
 
-Start parallel lanes for Phase 04 and Phase 05:
-- `store-lane`: implement `src/store/layout.zig`, `src/store/manifest.zig`, `src/store/archive.zig`, `src/store/store.zig`
-- `wrapper-lane`: implement `pkg/zpkg-build/` package and update example packages to use it
-- After those: Phase 06 workspace realization
+Start Phase 06 workspace realization:
+- Implement `src/realize/workspace.zig`, `src/realize/source_pkg.zig`, `src/realize/binary_adapter.zig`
+- Migrate remaining example packages (`hello-app`, `hello-headers`, `hello-tool`, `hello-tests`) to use `zpkg-build`
+- After Phase 06: Phase 07 build fallback pipeline
 
 ---
 
