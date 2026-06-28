@@ -155,7 +155,7 @@ pub const Resolver = struct {
             }
 
             // Parse the dependency manifest (stub: returns minimal manifest)
-            const dep_manifest = try parseDependencyManifest(dep);
+            const dep_manifest = try self.parseDependencyManifest(dep);
 
             // Cache takes ownership of cache_key.
             self.package_cache.put(cache_key, dep_manifest);
@@ -172,14 +172,19 @@ pub const Resolver = struct {
         return trimmed;
     }
 
-    fn parseDependencyManifest(dep: model.Dependency) !model.PackageManifest {
-        // For now, return a minimal manifest for dependencies.
-        // In a real implementation, this would read from a registry or local cache.
+    fn parseDependencyManifest(self: *Resolver, dep: model.Dependency) !model.PackageManifest {
+        // Return a minimal manifest. deinitOwned will free name and id.text,
+        // so both must be heap-allocated copies (not string literals or slices
+        // into dep, which is owned by the parent manifest).
+        const pkg_text = dep.package.asText();
+        const name = try self.allocator.dupe(u8, pkg_text);
+        errdefer self.allocator.free(name);
+        const id_text = try self.allocator.dupe(u8, pkg_text);
         return model.PackageManifest{
             .schema = 1,
             .package = .{
-                .name = "dependency",
-                .id = dep.package,
+                .name = name,
+                .id = .{ .text = id_text },
                 .version = dep.require.exact,
                 .backend = .zig,
             },

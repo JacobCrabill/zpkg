@@ -133,11 +133,13 @@ fn writeStderrFmt(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
 }
 
 fn generateLockfile(allocator: std.mem.Allocator, resolved: resolve.ResolvedRoot) model.Lockfile {
-    _ = allocator;
+    // Clone package_id so Lockfile.root owns its text independently of the
+    // parsed manifest (which is freed separately via manifest.deinitOwned).
+    const cloned_id = resolved.package_id.cloneOwned(allocator) catch unreachable;
     return .{
         .schema = 1,
         .root = .{
-            .package_id = resolved.package_id,
+            .package_id = cloned_id,
             .version = resolved.version,
         },
         .generated_by = null,
