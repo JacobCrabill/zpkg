@@ -24,8 +24,8 @@ This file should track the **current exact state**, not an idealized plan.
 ## Repository state
 
 - Branch: `main`
-- HEAD: `80e1094`
-- HEAD summary: `Implement Phase 05: zpkg-build wrappers and graph emission`
+- HEAD: `0dfce94`
+- HEAD summary: `Implement Phase 06: workspace realization engine`
 - Working tree: clean
 
 ### Relevant stash entries
@@ -44,8 +44,8 @@ This file should track the **current exact state**, not an idealized plan.
 | Phase 03 - Resolution and lockfile | Approved and merged | Resolver core, drift detection, `lock`/`update` CLI complete; reviewed and fixed |
 | Phase 04 - Store and manifest mgmt | Approved and merged | Store layout, manifest, archive, Store facade; reviewed and fixed |
 | Phase 05 - `zpkg-build` and graph emission | Approved and merged | Package API, emit, validate, hello-lib migrated; reviewed and fixed |
-| Phase 06 - Workspace realization | Not started | Waiting on Phase 05 — now unblocked |
-| Phase 07 - Build fallback pipeline | Not started | Waiting on Phase 06 |
+| Phase 06 - Workspace realization | Approved and merged | WorkspaceLayout, source symlink-forest, binary adapter, realize CLI |
+| Phase 07 - Build fallback pipeline | Not started | Waiting on Phase 06 — now unblocked |
 | Phase 08 - CLI and UX | Partial | `inspect`, `lock`, `update` exist; broader CLI remains incomplete |
 | Phase 09 - Export and relocation | Not started | Waiting on Phase 07 |
 | Phase 10 - Reproducibility and CI | Not started | Waiting on Phases 07/09 |
@@ -107,16 +107,14 @@ This file should track the **current exact state**, not an idealized plan.
 
 ## Current active / unresolved work
 
-### Phase 06 - Workspace realization
+### Phase 07 - Build fallback pipeline
 
 **Status:** unblocked, not started
 
-Next up: implement workspace realization engine:
-- `src/realize/workspace.zig`
-- `src/realize/source_pkg.zig`
-- `src/realize/binary_adapter.zig`
-
-Depends on Phase 04 (store) and Phase 05 (zpkg-build) — both now merged.
+Next up: implement the source-build fallback loop (`zpkg build`):
+- `src/realize/build_fallback.zig`
+- `src/cli/build.zig`
+- End-to-end `zpkg build` for one platform/profile
 
 ---
 
@@ -157,10 +155,10 @@ None currently. Phase 03 is merged. Phases 04/05 parallel window is open.
 
 ## Recommended immediate next actions
 
-Start Phase 06 workspace realization:
-- Implement `src/realize/workspace.zig`, `src/realize/source_pkg.zig`, `src/realize/binary_adapter.zig`
-- Migrate remaining example packages (`hello-app`, `hello-headers`, `hello-tool`, `hello-tests`) to use `zpkg-build`
-- After Phase 06: Phase 07 build fallback pipeline
+Start Phase 07 build fallback pipeline:
+- Implement `src/realize/build_fallback.zig` — topological traversal, binary-miss → source-build → store loop
+- Implement `src/cli/build.zig` — `zpkg build` command
+- Migrate remaining examples to `zpkg-build` (parallel with Phase 07)
 
 ---
 
