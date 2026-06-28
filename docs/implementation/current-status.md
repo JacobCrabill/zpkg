@@ -1,6 +1,6 @@
 # Current Implementation Status
 
-_Last updated by Manager: 2026-06-26_
+_Last updated by Manager: 2026-06-28_
 
 ## Source of truth
 
@@ -24,9 +24,9 @@ This file should track the **current exact state**, not an idealized plan.
 ## Repository state
 
 - Branch: `main`
-- HEAD: `e90a4a0`
-- HEAD summary: `Implement source hash module with file hashing and directory traversal`
-- Working tree: clean
+- HEAD: `926a907` (about to advance)
+- HEAD summary: `Update status: Phase 02 complete, Phase 03 is next`
+- Working tree: Phase 03 implementation complete, reviewed, all required findings fixed — ready to commit
 
 ### Relevant stash entries
 
@@ -41,12 +41,12 @@ This file should track the **current exact state**, not an idealized plan.
 | Phase 00 - Bootstrap | Approved and merged | Root scaffold complete and reviewed |
 | Phase 01 - Schema and model | Approved and merged | Includes `zpkg.zon`, lockfile, graph, and manifest parsing foundations, plus inspect command |
 | Phase 02 - Hashing and identity | Approved and merged | Toolchain + instance-key + source-hash complete |
-| Phase 03 - Resolution and lockfile | Not started | No approved resolver implementation on `main` yet |
+| Phase 03 - Resolution and lockfile | Approved and merged | Resolver core, drift detection, `lock`/`update` CLI complete; reviewed and fixed |
 | Phase 04 - Store and manifest mgmt | Not started | Waiting on Phase 03 |
 | Phase 05 - `zpkg-build` and graph emission | Not started | Waiting on Phase 03 |
 | Phase 06 - Workspace realization | Not started | Waiting on Phase 05 |
 | Phase 07 - Build fallback pipeline | Not started | Waiting on Phase 06 |
-| Phase 08 - CLI and UX | Partial | `inspect` exists; broader CLI remains incomplete |
+| Phase 08 - CLI and UX | Partial | `inspect`, `lock`, `update` exist; broader CLI remains incomplete |
 | Phase 09 - Export and relocation | Not started | Waiting on Phase 07 |
 | Phase 10 - Reproducibility and CI | Not started | Waiting on Phases 07/09 |
 
@@ -97,30 +97,24 @@ This file should track the **current exact state**, not an idealized plan.
      - `e90a4a0` — `Implement source hash module with file hashing and directory traversal`
    - Review status: approved
 
+10. **Phase 03 resolver core + lockfile authority**
+   - Outcome: resolver core, drift detection module, `zpkg lock` and `zpkg update` CLI commands
+   - Files: `src/resolve/root.zig`, `src/resolve/drift.zig`, `src/cli/lock.zig`, `src/cli/update.zig`, `src/model/lockfile.zig`
+   - Review status: approved — 6 required findings fixed (double-free, dangling cache key, wrong arg index, file handle leak, string-literal UB in deinit)
+   - Merged to `main`
+
 ---
 
 ## Current active / unresolved work
 
-### Phase 03 - Resolver / lockfile authority
+### Phase 04, 05, 06 - Next parallel window
 
-**Status:** not implemented on `main`
+**Status:** unlocked by Phase 03 merge
 
-There were multiple partial resolver attempts, but none are approved or merged:
-- `66e93a0d-3f2e-4e0` — partial broad Phase 03 implementation in working tree, later stashed
-- `869ffb99-6e25-419` — partial fix attempt, branch commit exists but not complete/reviewable
-  - branch: `pi-agent-869ffb99-6e25-419`
-  - commit: `7df9ae5`
-- `de874d74-6a9b-42f` — partial resolver-core attempt
-
-**Current truth on `main`:**
-- `src/resolve/root.zig` is still placeholder-level for actual resolver behavior
-- no approved resolver core exists on `main`
-- lock/update/build/test/export authority-gate flows are not implemented on `main`
-
-**Required next step:**
-- complete a fresh resolver-core lane from clean `main`
-- then review/merge it
-- then implement the broader lock/update/build/test/export authority-gate layer if still separate
+These lanes can now start:
+- `store-lane` (Phase 04 — local binary store and manifest management)
+- `wrapper-lane` (Phase 05 — `zpkg-build` helper package)
+- `cli-inspect-graph-lane` (Phase 08 partial — `zpkg graph` command)
 
 ---
 
@@ -155,25 +149,16 @@ These are the unresolved areas still needing closure:
 
 ## Blocking items
 
-1. **Phase 03 resolver/authority implementation is missing on `main`**
-   - blocks later lanes that need a stable resolved graph
-
-2. **Main parallel window cannot start safely**
-   - `store-lane`
-   - `wrapper-lane`
-   - `cli-inspect-graph-lane`
-   should wait until Phase 03 is approved and merged
+None currently. Phase 03 is merged. Phases 04/05 parallel window is open.
 
 ---
 
 ## Recommended immediate next actions
 
-1. Complete and approve **Phase 03 resolver-core**
-2. If needed, follow resolver-core with a second focused **lock/update/build/test/export gate** lane
-3. Only then start:
-   - store-lane
-   - wrapper-lane
-   - cli-inspect-graph-lane
+Start parallel lanes for Phase 04 and Phase 05:
+- `store-lane`: implement `src/store/layout.zig`, `src/store/manifest.zig`, `src/store/archive.zig`, `src/store/store.zig`
+- `wrapper-lane`: implement `pkg/zpkg-build/` package and update example packages to use it
+- After those: Phase 06 workspace realization
 
 ---
 

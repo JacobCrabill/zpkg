@@ -1,11 +1,13 @@
 const std = @import("std");
 const inspect = @import("inspect.zig");
+const lock = @import("lock.zig");
+const update = @import("update.zig");
 const workspace = @import("../util/workspace.zig");
 
 pub const help_text =
     \\zpkg - Zig package workspace realizer
     \\
-    \\Bootstrap status: package schema inspect implemented; other commands remain placeholders.
+    \\Status: package schema, resolution, and lockfile authority implemented.
     \\
     \\Usage:
     \\  zpkg [command]
@@ -14,8 +16,8 @@ pub const help_text =
     \\Commands:
     \\  inspect   Inspect package metadata from <pkg-root>/zpkg.zon
     \\  graph     Show resolved package graph (placeholder)
-    \\  lock      Create an authoritative lockfile (placeholder)
-    \\  update    Update the authoritative lockfile (placeholder)
+    \\  lock      Create an authoritative lockfile
+    \\  update    Update the authoritative lockfile
     \\  realize   Materialize a generated workspace (placeholder)
     \\  build     Build from an authoritative lockfile (placeholder)
     \\  test      Build and run the test graph (placeholder)
@@ -32,6 +34,10 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
 
     if (std.mem.eql(u8, args[1], "inspect")) {
         return inspect.run(args, io);
+    } else if (std.mem.eql(u8, args[1], "lock")) {
+        return lock.run(args, io);
+    } else if (std.mem.eql(u8, args[1], "update")) {
+        return update.run(args, io);
     }
 
     return writeUnknownCommand(io, args[1]);
