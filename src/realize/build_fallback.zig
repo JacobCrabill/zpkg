@@ -285,6 +285,13 @@ pub const BuildExecutor = struct {
 
             try stdout.print("[done]  {s}\n", .{key});
             try stdout.flush();
+
+            // Artifact is now in the store; replace the source-symlink workspace dir
+            // with a binary adapter so downstream packages in this same build run use
+            // the prebuilt .a rather than re-processing the source build.zig.
+            self.reifyStoreHit(key, lockfile) catch |err| {
+                try printStderr(self.io, "warning: failed to reify '{s}' after build: {s}\n", .{ key, @errorName(err) });
+            };
         }
 
         if (any_test_failed) return error.TestsFailed;
