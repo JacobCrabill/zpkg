@@ -1,6 +1,6 @@
 # Current Implementation Status
 
-_Last updated: 2026-06-29 (Phase 18 complete)_
+_Last updated: 2026-06-29 (Phases 19–28 planned; post-MVP review complete)_
 
 ## Source of truth
 
@@ -24,8 +24,8 @@ This file should track the **current exact state**, not an idealized plan.
 ## Repository state
 
 - Branch: `main`
-- HEAD: `a2d36fc` — `Implement Phase 18: wave-based parallel builds`
-- Working tree: clean
+- HEAD: `beef497` — `Update current-status: Phase 18 complete and merged`
+- Working tree: modified (`examples/diamond/app/zpkg.lock.zon` regenerated with current paths)
 
 ### Relevant stash entries
 
@@ -55,6 +55,16 @@ This file should track the **current exact state**, not an idealized plan.
 | Phase 16 - Source location model | Complete | explicit source_path in zpkg.zon + lockfile; source_dirs tracked in Resolver; paths normalized via std.fs.path.resolve |
 | Phase 17 - ZON parser hardening | Complete | zon_util AST parsing for all build.zig.zon reads; patchFingerprint parse-and-regenerate; PackageCache OOM fixed |
 | Phase 18 - Parallel builds | Complete | wave dispatch via std.Thread; --jobs N caps concurrency; validation-then-spawn prevents use-after-free on error |
+| Phase 19 - Relative lockfile paths | Not started | Lockfile source_path values must be relative to enable team/CI sharing |
+| Phase 20 - Source drift detection | Not started | Stale binaries used silently when source changes without re-locking |
+| Phase 21 - zpkg-build mandate | Not started | Library packages missing zpkg-build registration; contract validation absent for deps |
+| Phase 22 - Build profiles | Not started | All builds hardcoded to debug; no release/asan/coverage support |
+| Phase 23 - Graph tree display | Not started | `zpkg graph` shows flat list instead of dependency tree |
+| Phase 24 - Third-party wrapper packages | Not started | No story for wrapping non-zpkg upstream libraries (protobuf, gtest, etc.) |
+| Phase 25 - Workspace manifest | Not started | No cross-app consistency enforcement; per-package lockfiles diverge silently |
+| Phase 26 - zpkg-build code generation | Not started | Build.zig registration is verbose boilerplate duplicating zpkg.zon |
+| Phase 27 - Store GC | Not started | Store grows indefinitely; no pruning of unused artifacts |
+| Phase 28 - Version ranges | Not started | Only exact-version (`=`) constraints supported; `^`, `>=` deferred |
 
 ---
 
@@ -113,13 +123,20 @@ This file should track the **current exact state**, not an idealized plan.
 
 ## Current active / unresolved work
 
-Phases 00–15 implemented, reviewed, and merged.
+Phases 00–18 implemented, reviewed, and merged.  MVP core is functional: the diamond
+example builds end-to-end (cold and warm store), the binary runs correctly, and all
+tests pass.
 
-### Known stubs (non-blocking)
+A post-MVP architecture review (2026-06-29) validated correctness of Phases 14–18
+and identified ten follow-up phases (19–28) required for the tool to be useful to
+developers of a real large-scale multi-package C++ application.
+
+### Known stubs (non-blocking for MVP)
 
 - **`TargetKind.test_suite`**: `hello-tests` uses `.executable`; no enum variant exists yet
 - **Named-target filter completeness**: `LockfileInstance.target_name` is always `null` (resolver tracks package+domain only)
 - **null `target_name` backward-compat test**: correct behavior, no explicit test
+- **Lockfile absolute paths**: `examples/diamond/app/zpkg.lock.zon` currently has absolute paths; addressed by Phase 19
 
 ---
 
@@ -147,27 +164,58 @@ These agent outputs have already been accounted for and should not be used as th
 
 ### Open / still relevant
 
-These are the unresolved areas still needing closure:
-- **resolver-core implementation lane:** partial attempts exist, but **none approved/merged**
+No open agent lanes.  All prior lanes have been merged or superseded.
 
 ---
 
 ## Blocking items
 
-None currently. Phase 03 is merged. Phases 04/05 parallel window is open.
+None for the MVP.  Post-MVP phases 19–28 are prioritized below.
 
 ---
 
-## Recommended immediate next actions
+## Recommended next actions
 
-Milestone A (Schemas, hashes, resolution) is complete. Milestone B (Store, wrappers, realization) is complete. Milestone C (End-to-end build) is complete.
+Milestones A–D (MVP) are complete.  The tool is functional for the diamond toy example.
 
-A post-MVP architecture review identified four correctness issues requiring follow-up work, documented in `docs/follow-up.md` and in phases 14–18 under `docs/implementation/`.
+A post-MVP architecture review (2026-06-29) identified ten follow-up phases needed
+before the tool is useful for a real large-scale multi-package C++ project.
 
-**Recommended next actions (in order of priority):**
+### Priority tiers
 
-1. **Phase 16** (P1) — source location model
-2. **Phase 17** (P2) and **Phase 18** (P2) — can be done in parallel after P1
+| Tier | Meaning |
+|---|---|
+| **P0** | Makes the MVP unusable in practice (correctness or portability blocker) |
+| **P1** | Required before the tool can be applied to a real project |
+| **P2** | Important ergonomics or developer experience gaps |
+| **P3** | Growth and scalability; needed before the tool can expand significantly |
+
+### Recommended implementation order
+
+| Phase | Priority | Title | Rationale |
+|---|---|---|---|
+| **19** | P0 | Relative lockfile paths | Absolute paths in lockfile prevent team/CI sharing; fixes portability |
+| **20** | P0 | Source drift detection | Stale binaries used silently; correctness guarantee requires drift check |
+| **21** | P1 | zpkg-build mandate | Library packages bypass contract validation; only app registers with zpkg-build |
+| **22** | P1 | Build profiles | No release/asan/coverage builds; all profiles hardcoded to debug |
+| **23** | P1 | Graph tree display | `zpkg graph` shows flat list; breaks diagnostic utility |
+| **24** | P1 | Third-party wrapper packages | Real projects have external deps; no integration path exists today |
+| **25** | P2 | Workspace manifest | Multiple apps diverge on shared dep versions; no enforcement |
+| **26** | P2 | zpkg-build code generation | Boilerplate maintenance burden at scale (50+ packages) |
+| **27** | P2 | Store GC | Store grows indefinitely on active machines |
+| **28** | P3 | Version ranges | Exact-only constraints require mass edits on dependency upgrades |
+
+### Parallelism opportunities
+
+- Phases 19 and 20 are independent; can be implemented in parallel.
+- Phase 21 depends on the diamond example being buildable (Phase 19 must land first,
+  or the lockfile regenerated manually).
+- Phase 22 is independent of 21; can proceed in parallel.
+- Phase 23 requires understanding the root-instance gap (fixed cheaply in lock.zig);
+  otherwise independent.
+- Phase 24 is independent; can proceed after Phase 22 (needs profiles for test builds).
+- Phases 25–28 are each independent of each other and can proceed in parallel once
+  Phases 19–24 are complete.
 
 ---
 
