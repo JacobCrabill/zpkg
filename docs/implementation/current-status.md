@@ -1,6 +1,6 @@
 # Current Implementation Status
 
-_Last updated: 2026-06-29 (Phases 19–28 planned; post-MVP review complete)_
+_Last updated: 2026-06-29 (Phases 19–20 merged; Phases 21–28 queued)_
 
 ## Source of truth
 
@@ -24,8 +24,9 @@ This file should track the **current exact state**, not an idealized plan.
 ## Repository state
 
 - Branch: `main`
-- HEAD: `beef497` — `Update current-status: Phase 18 complete and merged`
-- Working tree: modified (`examples/diamond/app/zpkg.lock.zon` regenerated with current paths)
+- HEAD: `1556945` — `Fix Phase 20 drift detection to resolve relative lockfile paths`
+- Working tree: clean
+- `zpkg.lock.zon` is now gitignored (auto-generated; run `zpkg update <pkg-root>` to regenerate)
 
 ### Relevant stash entries
 
@@ -55,8 +56,8 @@ This file should track the **current exact state**, not an idealized plan.
 | Phase 16 - Source location model | Complete | explicit source_path in zpkg.zon + lockfile; source_dirs tracked in Resolver; paths normalized via std.fs.path.resolve |
 | Phase 17 - ZON parser hardening | Complete | zon_util AST parsing for all build.zig.zon reads; patchFingerprint parse-and-regenerate; PackageCache OOM fixed |
 | Phase 18 - Parallel builds | Complete | wave dispatch via std.Thread; --jobs N caps concurrency; validation-then-spawn prevents use-after-free on error |
-| Phase 19 - Relative lockfile paths | Not started | Lockfile source_path values must be relative to enable team/CI sharing |
-| Phase 20 - Source drift detection | Not started | Stale binaries used silently when source changes without re-locking |
+| Phase 19 - Relative lockfile paths | Approved and merged | `source_path` values relative to lockfile dir; `resolveLockfilePath` helper added; `zpkg.lock.zon` gitignored |
+| Phase 20 - Source drift detection | Approved and merged | `hashDirectory` traversal fixed; drift pre-pass in executor warns or hard-errors (`--strict-lockfile`); relative paths resolved via `lockfile_dir` |
 | Phase 21 - zpkg-build mandate | Not started | Library packages missing zpkg-build registration; contract validation absent for deps |
 | Phase 22 - Build profiles | Not started | All builds hardcoded to debug; no release/asan/coverage support |
 | Phase 23 - Graph tree display | Not started | `zpkg graph` shows flat list instead of dependency tree |
@@ -123,20 +124,17 @@ This file should track the **current exact state**, not an idealized plan.
 
 ## Current active / unresolved work
 
-Phases 00–18 implemented, reviewed, and merged.  MVP core is functional: the diamond
-example builds end-to-end (cold and warm store), the binary runs correctly, and all
-tests pass.
+Phases 00–20 implemented and merged.  P0 correctness issues are resolved: lockfiles
+are now portable (relative paths) and source drift is detected at build time.
 
-A post-MVP architecture review (2026-06-29) validated correctness of Phases 14–18
-and identified ten follow-up phases (19–28) required for the tool to be useful to
-developers of a real large-scale multi-package C++ application.
+Next priority is the P1 set (Phases 21–24), which are needed before the tool can be
+applied to a real project.
 
-### Known stubs (non-blocking for MVP)
+### Known stubs (non-blocking for current phases)
 
 - **`TargetKind.test_suite`**: `hello-tests` uses `.executable`; no enum variant exists yet
 - **Named-target filter completeness**: `LockfileInstance.target_name` is always `null` (resolver tracks package+domain only)
 - **null `target_name` backward-compat test**: correct behavior, no explicit test
-- **Lockfile absolute paths**: `examples/diamond/app/zpkg.lock.zon` currently has absolute paths; addressed by Phase 19
 
 ---
 
