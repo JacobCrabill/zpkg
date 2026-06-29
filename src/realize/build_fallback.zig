@@ -513,9 +513,10 @@ pub const BuildExecutor = struct {
                 const inst = lockfile.findInstance(instance_ref) orelse continue;
 
                 if (inst.source_path.len == 0 or inst.source_hash.len == 0) continue;
-                if (!std.fs.path.isAbsolute(inst.source_path)) continue;
 
-                const src_dir = std.Io.Dir.openDirAbsolute(self.io, inst.source_path, .{}) catch continue;
+                const resolved_src = resolveLockfilePath(allocator, self.lockfile_dir, inst.source_path) catch continue;
+                defer allocator.free(resolved_src);
+                const src_dir = std.Io.Dir.openDirAbsolute(self.io, resolved_src, .{}) catch continue;
                 defer src_dir.close(self.io);
 
                 const actual_hex = source_hash_mod.hashPackageSource(allocator, src_dir, self.io, 1) catch continue;
