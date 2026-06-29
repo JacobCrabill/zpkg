@@ -235,6 +235,11 @@ const lib = b.addLibrary(.{ .name = "C", .linkage = .static, .root_module = mod 
 `libA_dep.path("include")` returns a lazy path to libA's `include/` directory, which Zig resolves
 to the correct absolute path at build time regardless of where `zig build` was invoked.
 
+This pattern works identically whether `libA` is built from source or served from the
+zpkg store as a binary adapter.  When all dependencies are store hits, zpkg generates
+an adapter `build.zig` for each one that exposes the prebuilt `.a` via the same
+`dep.artifact("A")` call — consuming packages see no difference.
+
 ### Verifying libA standalone
 
 ```

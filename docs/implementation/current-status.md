@@ -1,6 +1,6 @@
 # Current Implementation Status
 
-_Last updated: 2026-06-28 (Phase 13 complete and merged)_
+_Last updated: 2026-06-28 (Phase 14 complete)_
 
 ## Source of truth
 
@@ -24,9 +24,9 @@ This file should track the **current exact state**, not an idealized plan.
 ## Repository state
 
 - Branch: `main`
-- HEAD: `9604fec`
+- HEAD: `9604fec` (Phase 14 implemented and reviewed, not yet committed)
 - HEAD summary: `Implement Phase 13: source hash, per-command help, realize fix, and root build`
-- Working tree: clean
+- Working tree: Phase 14 changes ready to commit
 
 ### Relevant stash entries
 
@@ -51,6 +51,11 @@ This file should track the **current exact state**, not an idealized plan.
 | Phase 10 - Reproducibility and CI | Approved and merged | determinism sort fix, reproducibility doc, CI workflow |
 | Phase 12 - Resolver and lockfile completion | Approved and merged | parseDependencyManifest reads real zpkg.zon; generateLockfile walks resolved graph; fingerprint and extra-dep fixes in workspace build.zig.zon |
 | Phase 13 - Source hash, per-command help, realize fix, root build | Approved and merged | real source_hash at lock time; --help for all subcommands; workspace fingerprint fix; zpkg build now builds root package and symlinks zig-out |
+| Phase 14 - Binary adapter integration | Complete | Warm-store path works: binary adapters extract .o files, patch fingerprints, build succeeds |
+| Phase 15 - Content-addressed store keys | Not started | P0: wire instance_key.zig into build pipeline; store key must be content hash, not pkg_id#domain |
+| Phase 16 - Source location model | Not started | P1: replace implicit ../basename convention with explicit source_path in zpkg.zon and lockfile |
+| Phase 17 - ZON parser hardening | Not started | P2: replace fragile string-scan parsers with zon_util.zig; fix PackageCache OOM panic |
+| Phase 18 - Parallel builds | Not started | P2: wave-based concurrent dispatch for independent packages in build executor |
 
 ---
 
@@ -109,7 +114,7 @@ This file should track the **current exact state**, not an idealized plan.
 
 ## Current active / unresolved work
 
-Phases 00–13 complete and merged. No active implementation work.
+Phases 00–14 implemented and reviewed. Phase 14 ready to commit.
 
 ### Known stubs (non-blocking)
 
@@ -158,7 +163,15 @@ None currently. Phase 03 is merged. Phases 04/05 parallel window is open.
 
 Milestone A (Schemas, hashes, resolution) is complete. Milestone B (Store, wrappers, realization) is complete. Milestone C (End-to-end build) is complete.
 
-**All planned phases complete.** The end-to-end workflow (`zpkg lock` → `zpkg build` → `./zig-out/bin/<app>`) is fully operational on the diamond example. No immediate next action defined.
+A post-MVP architecture review identified four correctness issues requiring follow-up work, documented in `docs/follow-up.md` and in phases 14–18 under `docs/implementation/`.
+
+**Recommended next actions (in order of priority):**
+
+1. **Phase 14** (P0) and **Phase 15** (P0) — these are independent and can run in parallel.
+   - Phase 14: binary adapter integration (warm-store path is currently broken for C/C++)
+   - Phase 15: content-addressed store keys (instance_key.zig is never used)
+2. **Phase 16** (P1) — source location model (after P0s are resolved)
+3. **Phase 17** (P2) and **Phase 18** (P2) — can be done in parallel after P1 is resolved
 
 ---
 

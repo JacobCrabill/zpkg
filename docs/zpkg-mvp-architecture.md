@@ -481,31 +481,52 @@ This keeps every package in a normal Zig build root and avoids in-place mutation
 
 ## Binary adapter contract
 
-A generated binary adapter package should expose:
+A generated binary adapter package is a real Zig package that exposes prebuilt
+artifacts through the standard `dep.artifact("X")` API, making it transparent to
+consuming `build.zig` files — they work identically whether a dependency comes from
+source or from the store.
 
-- named lazy paths:
-  - `include`
-  - `lib`
-  - `bin`
-  - `share`
-- metadata for:
-  - exported targets
-  - libraries
-  - tools
-  - resources
-  - include directories
-  - compile definitions
-  - system libraries
+### How it works
 
-Relevant Zig APIs:
+For each prebuilt static library in the store artifact (e.g. `lib/libE.a`), the
+adapter generates a `b.addLibrary` step and then bypasses normal compilation:
 
-- `b.addNamedLazyPath(...)`
-- `dep.namedLazyPath(...)`
-- `root_module.addIncludePath(...)`
-- `root_module.addLibraryPath(...)`
-- `root_module.linkSystemLibrary(...)`
+```zig
+const lib_e = b.addLibrary(.{ .name = "E", .root_module = mod_e, .linkage = .static });
+b.installArtifact(lib_e);   // allocates generated_bin via getEmittedBin()
+lib_e.generated_bin.?.path = b.pathFromRoot("lib/libE.a");  // point at prebuilt archive
+lib_e.step.makeFn = noopMake;  // skip llvm-ar; store archive is used directly
+```
 
-Avoid relying on `dep.artifact("...")` for prebuilt tools in the MVP.
+`generated_bin.?.path` is set at configure time to the symlink in the adapter directory
+that resolves to the store's expanded artifact.  `noopMake` prevents the normal
+`make` function from overwriting that path with a Zig cache path.  The linker receives
+the prebuilt `.a` as a positional argument and extracts its object files directly —
+no duplication, no re-archiving.
+
+Transitive static library dependencies are wired through the standard Zig build graph:
+```zig
+mod_e.linkLibrary(libC_dep.artifact("C"));
+mod_e.linkLibrary(libD_dep.artifact("D"));
+```
+Zig's `getCompileDependencies` traversal propagates these to the final consumer's link
+command automatically.  The consuming `build.zig` only needs to reference its direct
+dependencies.
+
+### Adapter directory layout
+
+```
+deps/<pkg>#<domain>/
+    build.zig          — generated; exposes artifacts via noopMake + generated_bin redirect
+    build.zig.zon      — generated; fingerprint auto-corrected on first use
+    include/           — symlink → store/expanded/<pkg>#<domain>/include/
+    lib/               — symlink → store/expanded/<pkg>#<domain>/lib/
+    bin/               — symlink → store/expanded/<pkg>#<domain>/bin/   (if present)
+    share/             — symlink → store/expanded/<pkg>#<domain>/share/ (if present)
+```
+
+No object files are extracted from the store archives.  The adapter directory contains
+only the two generated files and symlinks into the (read-only) expanded store prefix.
 
 ---
 

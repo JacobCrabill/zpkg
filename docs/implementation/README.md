@@ -165,6 +165,11 @@ Subagent plans and prompts should be treated as intent; `current-status.md` is t
 - `phase-08-cli-and-ux.md`
 - `phase-09-export-and-relocation.md`
 - `phase-10-reproducibility-and-ci.md`
+- `phase-14-binary-adapter-integration.md`
+- `phase-15-content-addressed-store.md`
+- `phase-16-source-location-model.md`
+- `phase-17-zon-parser-hardening.md`
+- `phase-18-parallel-builds.md`
 - `review-process.md`
 - `current-status.md`
 - `subagent-launch-plan.md`
