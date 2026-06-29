@@ -14,6 +14,10 @@ pub const BuildPlan = struct {
     mode: BuildMode,
     /// Ordered list of display keys (<pkg_id>#<domain>), dependency-first.
     build_order: [][]u8,
+    /// Wave-grouped view of build_order.
+    /// waves[i] is a slice of pointers borrowed from build_order (not owned strings).
+    /// Outer slice (waves) and inner slices (per-wave) are owned; strings are NOT freed here.
+    waves: [][][]u8,
     /// Display keys already satisfied by the store.
     store_hits: std.StringHashMap(void),
     /// Display keys that need source builds.
@@ -23,6 +27,10 @@ pub const BuildPlan = struct {
     instance_keys: std.StringHashMap([]const u8),
 
     pub fn deinit(self: *BuildPlan) void {
+        // Free wave slices (inner and outer); strings are borrowed from build_order.
+        for (self.waves) |wave| self.allocator.free(wave);
+        self.allocator.free(self.waves);
+
         for (self.build_order) |key| self.allocator.free(key);
         self.allocator.free(self.build_order);
 
@@ -46,7 +54,7 @@ pub const BuildPlan = struct {
 };
 
 /// Plan which instances need building given a lockfile and store state.
-/// Returns instances in dependency-first topological order.
+/// Returns instances in dependency-first topological order, grouped into waves.
 /// `toolchain_fp` is used to derive content-addressed store keys.
 pub fn planBuild(
     allocator: std.mem.Allocator,
@@ -60,6 +68,9 @@ pub fn planBuild(
         for (order.items) |k| allocator.free(k);
         order.deinit(allocator);
     }
+
+    var levels: std.ArrayList(usize) = .empty;
+    errdefer levels.deinit(allocator);
 
     var store_hits = std.StringHashMap(void).init(allocator);
     errdefer {
@@ -85,8 +96,9 @@ pub fn planBuild(
         instance_keys.deinit();
     }
 
-    // visited set tracks display keys we've already appended to order.
-    var visited = std.StringHashMap(void).init(allocator);
+    // visited maps display key → computed level. Value 0 is both "leaf" and "in-progress"
+    // (cycle guard); the actual level is updated after deps are processed.
+    var visited = std.StringHashMap(usize).init(allocator);
     defer {
         var it = visited.keyIterator();
         while (it.next()) |k| allocator.free(k.*);
@@ -103,12 +115,13 @@ pub fn planBuild(
 
         if (visited.contains(key_text)) continue;
 
-        try dfsVisit(
+        _ = try dfsVisit(
             allocator,
             lockfile,
             instance,
             &visited,
             &order,
+            &levels,
             &store_hits,
             &store_misses,
             &instance_keys,
@@ -117,45 +130,86 @@ pub fn planBuild(
         );
     }
 
+    // Build wave structure: group build_order entries by their level.
+    const build_order_slice = try order.toOwnedSlice(allocator);
+    errdefer {
+        for (build_order_slice) |k| allocator.free(k);
+        allocator.free(build_order_slice);
+    }
+    const levels_slice = try levels.toOwnedSlice(allocator);
+    defer allocator.free(levels_slice);
+
+    var max_level: usize = 0;
+    for (levels_slice) |lvl| max_level = @max(max_level, lvl);
+
+    // Count nodes per level.
+    const level_counts = try allocator.alloc(usize, max_level + 1);
+    defer allocator.free(level_counts);
+    @memset(level_counts, 0);
+    for (levels_slice) |lvl| level_counts[lvl] += 1;
+
+    // Allocate outer waves slice; init each inner slice to empty so errdefer is safe.
+    const waves = try allocator.alloc([][]u8, max_level + 1);
+    errdefer {
+        for (waves) |w| allocator.free(w);
+        allocator.free(waves);
+    }
+    for (waves) |*w| w.* = &.{};
+    for (0..max_level + 1) |i| {
+        waves[i] = try allocator.alloc([]u8, level_counts[i]);
+    }
+
+    // Fill waves (reuse level_counts as fill cursor).
+    @memset(level_counts, 0);
+    for (build_order_slice, levels_slice) |key, lvl| {
+        waves[lvl][level_counts[lvl]] = key; // borrowed pointer into build_order_slice
+        level_counts[lvl] += 1;
+    }
+
     return .{
         .allocator = allocator,
         .mode = mode,
-        .build_order = try order.toOwnedSlice(allocator),
+        .build_order = build_order_slice,
+        .waves = waves,
         .store_hits = store_hits,
         .store_misses = store_misses,
         .instance_keys = instance_keys,
     };
 }
 
+/// Recursive DFS visitor. Returns the computed level of `instance` (0 for leaves).
+/// Appends to `order` and `levels` in post-order (deps before parent).
 fn dfsVisit(
     allocator: std.mem.Allocator,
     lockfile: model.Lockfile,
     instance: *const model.lockfile.Instance,
-    visited: *std.StringHashMap(void),
+    visited: *std.StringHashMap(usize),
     order: *std.ArrayList([]u8),
+    levels: *std.ArrayList(usize),
     store_hits: *std.StringHashMap(void),
     store_misses: *std.StringHashMap(void),
     instance_keys: *std.StringHashMap([]const u8),
     store: *store_mod.Store,
     toolchain_fp: model.ToolchainFingerprint,
-) !void {
+) !usize {
     const key_text = try std.fmt.allocPrint(allocator, "{s}#{s}", .{
         instance.key.package_id.asText(),
         instance.key.domain.asText(),
     });
     defer allocator.free(key_text);
 
-    if (visited.contains(key_text)) return;
+    // Already visited — return cached level (or 0 for in-progress cycle guard).
+    if (visited.get(key_text)) |level| return level;
 
-    // Mark visited before recursing to handle cycles gracefully.
-    // Use an ownership flag: once put() succeeds, planBuild's defer owns visited_key.
+    // Mark as in-progress with placeholder level 0 to break cycles.
     const visited_key = try allocator.dupe(u8, key_text);
     var visited_key_taken = false;
     errdefer if (!visited_key_taken) allocator.free(visited_key);
-    try visited.put(visited_key, {});
+    try visited.put(visited_key, 0);
     visited_key_taken = true;
 
-    // Visit deps first so their instance_keys entries are populated.
+    // Visit deps first and accumulate the maximum dep level.
+    var node_level: usize = 0;
     for (instance.deps) |dep| {
         const dep_key_text = try std.fmt.allocPrint(allocator, "{s}#{s}", .{
             dep.instance.package_id.asText(),
@@ -163,23 +217,32 @@ fn dfsVisit(
         });
         defer allocator.free(dep_key_text);
 
-        if (visited.contains(dep_key_text)) continue;
+        if (visited.get(dep_key_text)) |dep_level| {
+            // Already visited (or in-progress cycle): use its cached level.
+            node_level = @max(node_level, dep_level + 1);
+            continue;
+        }
 
         if (lockfile.findInstance(dep.instance)) |dep_instance| {
-            try dfsVisit(
+            const dep_level = try dfsVisit(
                 allocator,
                 lockfile,
                 dep_instance,
                 visited,
                 order,
+                levels,
                 store_hits,
                 store_misses,
                 instance_keys,
                 store,
                 toolchain_fp,
             );
+            node_level = @max(node_level, dep_level + 1);
         }
     }
+
+    // Update visited entry with the actual computed level (was 0 placeholder).
+    if (visited.getPtr(key_text)) |ptr| ptr.* = node_level;
 
     // Build the dep list for hash computation.
     // Each dep_hex slice is duped so it remains valid after the loop body frees dep_display.
@@ -228,7 +291,6 @@ fn dfsVisit(
     }) catch fallbackHex(key_text, toolchain_fp);
 
     // Store mapping: display_key → hex_digest (both owned by instance_keys).
-    // Use ownership flags: once put() succeeds, planBuild's errdefer owns the pair.
     const ik_key = try allocator.dupe(u8, key_text);
     var ik_key_taken = false;
     errdefer if (!ik_key_taken) allocator.free(ik_key);
@@ -239,13 +301,13 @@ fn dfsVisit(
     ik_key_taken = true;
     hex_str_taken = true;
 
-    // Append display key to build order.
-    // Use ownership flag: once append() succeeds, planBuild's errdefer owns order_key.
+    // Append display key to build order and its level to levels.
     const order_key = try allocator.dupe(u8, key_text);
     var order_key_taken = false;
     errdefer if (!order_key_taken) allocator.free(order_key);
     try order.append(allocator, order_key);
     order_key_taken = true;
+    try levels.append(allocator, node_level);
 
     // Check store using the content-addressed key.
     if (store.hasArtifact(hex_str)) {
@@ -257,6 +319,8 @@ fn dfsVisit(
         errdefer allocator.free(miss_key);
         try store_misses.put(miss_key, {});
     }
+
+    return node_level;
 }
 
 /// Produce a deterministic 64-char hex fallback when `deriveHex` cannot run
@@ -271,6 +335,56 @@ fn fallbackHex(display_key: []const u8, toolchain_fp: model.ToolchainFingerprint
     return hh.final();
 }
 
+/// Shared context passed to each parallel build worker.
+const WorkerCtx = struct {
+    executor: *BuildExecutor,
+    instance: *const model.lockfile.Instance,
+    display_key: []const u8,
+    store_key: []const u8,
+    lockfile: model.Lockfile,
+    mode: BuildMode,
+    stdout_mutex: *std.Io.Mutex,
+    failed: *std.atomic.Value(bool),
+    test_failed: *std.atomic.Value(bool),
+};
+
+/// Thread worker: builds one instance and prints status under the shared mutex.
+fn buildWorker(ctx: *WorkerCtx) void {
+    const short_key = ctx.store_key[0..@min(16, ctx.store_key.len)];
+
+    {
+        ctx.stdout_mutex.lockUncancelable(ctx.executor.io);
+        defer ctx.stdout_mutex.unlock(ctx.executor.io);
+        var buf: [512]u8 = undefined;
+        var f: std.Io.File.Writer = .init(.stdout(), ctx.executor.io, &buf);
+        f.interface.print("[build] {s}  {s}\n", .{ ctx.display_key, short_key }) catch {};
+        f.interface.flush() catch {};
+    }
+
+    ctx.executor.buildInstance(ctx.instance, ctx.display_key, ctx.store_key, ctx.lockfile, ctx.mode) catch |err| {
+        ctx.failed.store(true, .release);
+        if (err == error.TestsFailed) ctx.test_failed.store(true, .release);
+        ctx.stdout_mutex.lockUncancelable(ctx.executor.io);
+        defer ctx.stdout_mutex.unlock(ctx.executor.io);
+        var buf: [512]u8 = undefined;
+        var f: std.Io.File.Writer = .init(.stdout(), ctx.executor.io, &buf);
+        f.interface.print("[fail]  {s}  {s}\n", .{ ctx.display_key, short_key }) catch {};
+        f.interface.flush() catch {};
+        return;
+    };
+
+    ctx.executor.reifyStoreHit(ctx.display_key, ctx.store_key, ctx.lockfile) catch {};
+
+    {
+        ctx.stdout_mutex.lockUncancelable(ctx.executor.io);
+        defer ctx.stdout_mutex.unlock(ctx.executor.io);
+        var buf: [512]u8 = undefined;
+        var f: std.Io.File.Writer = .init(.stdout(), ctx.executor.io, &buf);
+        f.interface.print("[done]  {s}  {s}\n", .{ ctx.display_key, short_key }) catch {};
+        f.interface.flush() catch {};
+    }
+}
+
 pub const BuildExecutor = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -278,6 +392,8 @@ pub const BuildExecutor = struct {
     workspace: *realize.WorkspaceLayout,
     /// Root package source directory (absolute path).
     pkg_root: []const u8,
+    /// Maximum number of concurrent build jobs (1 = serial).
+    max_jobs: usize,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -285,6 +401,7 @@ pub const BuildExecutor = struct {
         store: *store_mod.Store,
         workspace: *realize.WorkspaceLayout,
         pkg_root: []const u8,
+        max_jobs: usize,
     ) BuildExecutor {
         return .{
             .allocator = allocator,
@@ -292,6 +409,7 @@ pub const BuildExecutor = struct {
             .store = store,
             .workspace = workspace,
             .pkg_root = pkg_root,
+            .max_jobs = if (max_jobs == 0) 1 else max_jobs,
         };
     }
 
@@ -364,19 +482,21 @@ pub const BuildExecutor = struct {
         plan: BuildPlan,
         lockfile: model.Lockfile,
     ) !void {
+        const allocator = self.allocator;
         var stdout_buf: [4096]u8 = undefined;
         var stdout_file: std.Io.File.Writer = .init(.stdout(), self.io, &stdout_buf);
         const stdout = &stdout_file.interface;
 
         var any_test_failed = false;
+        var stdout_mutex: std.Io.Mutex = .init;
 
-        for (plan.build_order) |key| {
-            // Look up the content-addressed store key; fall back to display key if missing.
-            const store_key = plan.instance_keys.get(key) orelse key;
-            // Show first 16 hex chars in logs for readability.
-            const short_key = store_key[0..@min(16, store_key.len)];
+        for (plan.waves) |wave| {
+            // 1. Handle store hits in this wave serially (fast, no build work needed).
+            for (wave) |key| {
+                if (!plan.store_hits.contains(key)) continue;
+                const store_key = plan.instance_keys.get(key) orelse key;
+                const short_key = store_key[0..@min(16, store_key.len)];
 
-            if (plan.store_hits.contains(key)) {
                 if (plan.mode == .run_tests) {
                     try stdout.print("[skip] {s}  {s} (pre-built; no test binary)\n", .{ key, short_key });
                 } else {
@@ -384,45 +504,115 @@ pub const BuildExecutor = struct {
                 }
                 try stdout.flush();
 
-                // Generate binary adapter so downstream source builds can consume it.
                 self.reifyStoreHit(key, store_key, lockfile) catch |err| {
                     try printStderr(self.io, "warning: failed to create binary adapter for '{s}': {s}\n", .{ key, @errorName(err) });
                 };
-                continue;
             }
 
-            // Find the instance in the lockfile.
-            const instance_ref = model.lockfile.InstanceRef.parse(key) catch {
-                try printStderr(self.io, "error: invalid instance key in plan: {s}\n", .{key});
-                return error.InvalidInstanceKey;
-            };
-            const instance = lockfile.findInstance(instance_ref) orelse {
-                try printStderr(self.io, "error: instance not found in lockfile: {s}\n", .{key});
-                return error.InstanceNotFound;
-            };
+            // 2. Collect store misses in this wave for parallel dispatch.
+            var miss_keys: std.ArrayList([]const u8) = .empty;
+            defer miss_keys.deinit(allocator);
+            for (wave) |key| {
+                if (plan.store_misses.contains(key)) try miss_keys.append(allocator, key);
+            }
+            if (miss_keys.items.len == 0) continue;
 
-            try stdout.print("[build] {s}  {s}\n", .{ key, short_key });
-            try stdout.flush();
+            const jobs = @min(self.max_jobs, miss_keys.items.len);
 
-            self.buildInstance(instance, key, store_key, lockfile, plan.mode) catch |err| {
-                if (err == error.TestsFailed) {
-                    any_test_failed = true;
-                    try stdout.print("[fail]  {s}  {s} (tests failed)\n", .{ key, short_key });
+            if (jobs <= 1) {
+                // Serial path — identical behavior to original loop.
+                for (miss_keys.items) |key| {
+                    const store_key = plan.instance_keys.get(key) orelse key;
+                    const short_key = store_key[0..@min(16, store_key.len)];
+
+                    const instance_ref = model.lockfile.InstanceRef.parse(key) catch {
+                        try printStderr(self.io, "error: invalid instance key in plan: {s}\n", .{key});
+                        return error.InvalidInstanceKey;
+                    };
+                    const instance = lockfile.findInstance(instance_ref) orelse {
+                        try printStderr(self.io, "error: instance not found in lockfile: {s}\n", .{key});
+                        return error.InstanceNotFound;
+                    };
+
+                    try stdout.print("[build] {s}  {s}\n", .{ key, short_key });
                     try stdout.flush();
-                    continue;
+
+                    self.buildInstance(instance, key, store_key, lockfile, plan.mode) catch |err| {
+                        if (err == error.TestsFailed) {
+                            any_test_failed = true;
+                            try stdout.print("[fail]  {s}  {s} (tests failed)\n", .{ key, short_key });
+                            try stdout.flush();
+                            continue;
+                        }
+                        return err;
+                    };
+
+                    try stdout.print("[done]  {s}  {s}\n", .{ key, short_key });
+                    try stdout.flush();
+
+                    self.reifyStoreHit(key, store_key, lockfile) catch |err| {
+                        try printStderr(self.io, "warning: failed to reify '{s}' after build: {s}\n", .{ key, @errorName(err) });
+                    };
                 }
-                return err;
-            };
+            } else {
+                // Parallel path — dispatch misses in batches of max_jobs.
+                // Pre-allocate at full wave size (reused across batches).
+                var wave_failed = std.atomic.Value(bool).init(false);
+                var wave_test_failed = std.atomic.Value(bool).init(false);
 
-            try stdout.print("[done]  {s}  {s}\n", .{ key, short_key });
-            try stdout.flush();
+                const ctxs = try allocator.alloc(WorkerCtx, miss_keys.items.len);
+                defer allocator.free(ctxs);
+                const threads = try allocator.alloc(std.Thread, miss_keys.items.len);
+                defer allocator.free(threads);
 
-            // Artifact is now in the store; replace the source-symlink workspace dir
-            // with a binary adapter so downstream packages in this same build run use
-            // the prebuilt .a rather than re-processing the source build.zig.
-            self.reifyStoreHit(key, store_key, lockfile) catch |err| {
-                try printStderr(self.io, "warning: failed to reify '{s}' after build: {s}\n", .{ key, @errorName(err) });
-            };
+                // Validation pass: resolve all instances before spawning any threads.
+                // This ensures no thread has been started if a validation error is returned.
+                for (ctxs, miss_keys.items) |*ctx, key| {
+                    const store_key = plan.instance_keys.get(key) orelse key;
+                    const instance_ref = model.lockfile.InstanceRef.parse(key) catch {
+                        try printStderr(self.io, "error: invalid instance key in plan: {s}\n", .{key});
+                        return error.InvalidInstanceKey;
+                    };
+                    const instance = lockfile.findInstance(instance_ref) orelse {
+                        try printStderr(self.io, "error: instance not found in lockfile: {s}\n", .{key});
+                        return error.InstanceNotFound;
+                    };
+                    ctx.* = .{
+                        .executor = self,
+                        .instance = instance,
+                        .display_key = key,
+                        .store_key = store_key,
+                        .lockfile = lockfile,
+                        .mode = plan.mode,
+                        .stdout_mutex = &stdout_mutex,
+                        .failed = &wave_failed,
+                        .test_failed = &wave_test_failed,
+                    };
+                }
+
+                // Spawn-join pass: process in batches of max_jobs so --jobs N is honoured.
+                var offset: usize = 0;
+                while (offset < miss_keys.items.len) {
+                    const end = @min(offset + self.max_jobs, miss_keys.items.len);
+                    const batch_ctxs = ctxs[offset..end];
+                    const batch_threads = threads[offset..end];
+
+                    // Track how many threads were actually spawned so we can join them
+                    // even if a spawn fails mid-batch.
+                    var spawned: usize = 0;
+                    errdefer for (batch_threads[0..spawned]) |t| t.join();
+                    for (batch_ctxs, batch_threads) |*ctx, *t| {
+                        t.* = try std.Thread.spawn(.{}, buildWorker, .{ctx});
+                        spawned += 1;
+                    }
+                    for (batch_threads) |t| t.join();
+
+                    offset = end;
+                }
+
+                if (wave_test_failed.load(.acquire)) any_test_failed = true;
+                if (wave_failed.load(.acquire)) return error.BuildFailed;
+            }
         }
 
         if (any_test_failed) return error.TestsFailed;
@@ -576,8 +766,6 @@ pub const BuildExecutor = struct {
 
         // Build dep_instances list for the manifest.
         const dep_instances = try allocator.alloc(manifest_mod.InstanceRef, instance.deps.len);
-        // defer (not errdefer) covers both success and error; errdefer here would double-free the
-        // outer slice since the defer block below unconditionally frees it.
         var dep_instances_init: usize = 0;
         defer {
             for (dep_instances[0..dep_instances_init]) |d| d.deinitOwned(allocator);
@@ -610,8 +798,6 @@ pub const BuildExecutor = struct {
 
         // The manifest records the human-readable instance identity (display_key).
         const instance_ref = try manifest_mod.InstanceRef.parseOwned(allocator, display_key);
-        // defer (not errdefer): storeArtifact only reads the manifest; we own instance_ref
-        // throughout and must free it regardless of whether storeArtifact succeeds or fails.
         defer instance_ref.deinitOwned(allocator);
 
         const source_hash = try allocator.dupe(u8, if (instance.source_hash.len > 0) instance.source_hash else "");
@@ -625,9 +811,6 @@ pub const BuildExecutor = struct {
             .selected_options = selected_options,
             .dep_instances = dep_instances,
         };
-        // storeArtifact serializes the manifest but does not take ownership of any fields.
-        // All heap fields (instance_ref, source_hash, selected_options, dep_instances) are
-        // freed by the defer blocks above when this function exits.
         _ = lockfile; // suppress unused warning
         // Use the content-addressed store_key for the store directory name.
         try self.store.storeArtifact(store_key, staging_dir, artifact_manifest);
@@ -886,4 +1069,11 @@ test "planBuild topological order: leaves before parents" {
     try std.testing.expect(lib_pos != null);
     try std.testing.expect(root_pos != null);
     try std.testing.expect(lib_pos.? < root_pos.?);
+
+    // lib is a leaf (level 0), root depends on lib (level 1) → 2 waves.
+    try std.testing.expectEqual(@as(usize, 2), plan.waves.len);
+    try std.testing.expectEqual(@as(usize, 1), plan.waves[0].len);
+    try std.testing.expectEqual(@as(usize, 1), plan.waves[1].len);
+    try std.testing.expectEqualStrings("zpkg.example.lib#target", plan.waves[0][0]);
+    try std.testing.expectEqualStrings("zpkg.example.root#target", plan.waves[1][0]);
 }

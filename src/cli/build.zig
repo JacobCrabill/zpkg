@@ -10,22 +10,25 @@ pub const help_text =
     \\zpkg build — Build all instances from the lockfile
     \\
     \\Usage:
-    \\  zpkg build <pkg-root> [--with-tests]
+    \\  zpkg build <pkg-root> [--with-tests] [--jobs N]
     \\
     \\Arguments:
     \\  <pkg-root>     Path to the package directory containing zpkg.lock.zon
     \\
     \\Options:
     \\  --with-tests   Also build test instances
+    \\  --jobs N       Maximum number of parallel build jobs (default: CPU count; 1 for serial)
     \\
     \\Example:
     \\  zpkg build .
+    \\  zpkg build . --jobs 1
     \\
 ;
 
 pub fn run(args: []const []const u8, io: std.Io) !void {
     var with_tests = false;
     var pkg_root: ?[]const u8 = null;
+    var max_jobs: ?usize = null;
 
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
@@ -38,6 +41,21 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
             return;
         } else if (std.mem.eql(u8, args[i], "--with-tests")) {
             with_tests = true;
+        } else if (std.mem.eql(u8, args[i], "--jobs")) {
+            i += 1;
+            if (i >= args.len) {
+                try writeStderr(io, "error: --jobs requires a number\n");
+                return error.InvalidArgument;
+            }
+            const n = std.fmt.parseInt(usize, args[i], 10) catch {
+                try writeStderrFmt(io, "error: --jobs value must be a positive integer: {s}\n", .{args[i]});
+                return error.InvalidArgument;
+            };
+            if (n == 0) {
+                try writeStderr(io, "error: --jobs must be at least 1\n");
+                return error.InvalidArgument;
+            }
+            max_jobs = n;
         } else if (pkg_root == null) {
             pkg_root = args[i];
         } else {
@@ -47,16 +65,16 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     }
 
     const root = pkg_root orelse {
-        try writeStderr(io, "error: build expects a package root path\nusage: zpkg build <pkg-root> [--with-tests]\n");
+        try writeStderr(io, "error: build expects a package root path\nusage: zpkg build <pkg-root> [--with-tests] [--jobs N]\n");
         return error.InvalidArgument;
     };
 
     const mode: build_fallback.BuildMode = if (with_tests) .build_with_tests else .build;
 
-    try runBuild(root, mode, io);
+    try runBuild(root, mode, io, max_jobs);
 }
 
-pub fn runBuild(pkg_root: []const u8, mode: build_fallback.BuildMode, io: std.Io) !void {
+pub fn runBuild(pkg_root: []const u8, mode: build_fallback.BuildMode, io: std.Io, max_jobs_override: ?usize) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -139,8 +157,11 @@ pub fn runBuild(pkg_root: []const u8, mode: build_fallback.BuildMode, io: std.Io
     );
     try stdout.flush();
 
+    // Resolve max_jobs: explicit flag > CPU count > fallback of 4.
+    const max_jobs = max_jobs_override orelse (std.Thread.getCpuCount() catch 4);
+
     // Execute plan.
-    var executor = build_fallback.BuildExecutor.init(allocator, io, &store, &layout, abs_root);
+    var executor = build_fallback.BuildExecutor.init(allocator, io, &store, &layout, abs_root, max_jobs);
     defer executor.deinit();
 
     try executor.execute(plan, lockfile);
