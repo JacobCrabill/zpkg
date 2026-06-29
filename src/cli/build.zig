@@ -3,6 +3,7 @@ const schema = @import("../schema/root.zig");
 const realize = @import("../realize/root.zig");
 const build_fallback = @import("../realize/build_fallback.zig");
 const store_mod = @import("../store/store.zig");
+const toolchain_fingerprint_mod = @import("../hash/toolchain_fingerprint.zig");
 const diag = @import("../util/diag.zig");
 
 pub const help_text =
@@ -119,8 +120,12 @@ pub fn runBuild(pkg_root: []const u8, mode: build_fallback.BuildMode, io: std.Io
     var store = try store_mod.Store.init(allocator, io, abs_root);
     defer store.deinit();
 
+    // Detect toolchain fingerprint once for the entire build invocation.
+    const toolchain_fp = try toolchain_fingerprint_mod.detect(allocator, io);
+    defer toolchain_fingerprint_mod.deinitOwned(allocator, toolchain_fp);
+
     // Plan the build.
-    var plan = try build_fallback.planBuild(allocator, lockfile, &store, mode);
+    var plan = try build_fallback.planBuild(allocator, lockfile, &store, mode, toolchain_fp);
     defer plan.deinit();
 
     // Print plan summary.

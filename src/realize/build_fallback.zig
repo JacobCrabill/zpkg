@@ -3,6 +3,8 @@ const model = @import("../model/root.zig");
 const store_mod = @import("../store/store.zig");
 const realize = @import("root.zig");
 const manifest_mod = @import("../store/manifest.zig");
+const instance_key_mod = @import("../hash/instance_key.zig");
+const toolchain_fingerprint_mod = @import("../hash/toolchain_fingerprint.zig");
 
 pub const BuildMode = enum { build, build_with_tests, run_tests };
 
@@ -10,12 +12,15 @@ pub const BuildPlan = struct {
     allocator: std.mem.Allocator,
     /// Build mode for this plan (propagated to the executor).
     mode: BuildMode,
-    /// Ordered list of instance key strings (dependency-first, leaves first).
+    /// Ordered list of display keys (<pkg_id>#<domain>), dependency-first.
     build_order: [][]u8,
-    /// Instance keys already satisfied by the store.
+    /// Display keys already satisfied by the store.
     store_hits: std.StringHashMap(void),
-    /// Instance keys that need source builds.
+    /// Display keys that need source builds.
     store_misses: std.StringHashMap(void),
+    /// Maps display key (<pkg_id>#<domain>) → content-addressed hex-digest store key.
+    /// Both key and value slices are owned by this map.
+    instance_keys: std.StringHashMap([]const u8),
 
     pub fn deinit(self: *BuildPlan) void {
         for (self.build_order) |key| self.allocator.free(key);
@@ -29,17 +34,26 @@ pub const BuildPlan = struct {
         while (miss_it.next()) |k| self.allocator.free(k.*);
         self.store_misses.deinit();
 
+        var ik_it = self.instance_keys.iterator();
+        while (ik_it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            self.allocator.free(entry.value_ptr.*);
+        }
+        self.instance_keys.deinit();
+
         self.* = undefined;
     }
 };
 
 /// Plan which instances need building given a lockfile and store state.
 /// Returns instances in dependency-first topological order.
+/// `toolchain_fp` is used to derive content-addressed store keys.
 pub fn planBuild(
     allocator: std.mem.Allocator,
     lockfile: model.Lockfile,
     store: *store_mod.Store,
     mode: BuildMode,
+    toolchain_fp: model.ToolchainFingerprint,
 ) !BuildPlan {
     var order: std.ArrayList([]u8) = .empty;
     errdefer {
@@ -61,7 +75,17 @@ pub fn planBuild(
         store_misses.deinit();
     }
 
-    // visited set tracks instance keys we've already appended to order.
+    var instance_keys = std.StringHashMap([]const u8).init(allocator);
+    errdefer {
+        var it = instance_keys.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.*);
+        }
+        instance_keys.deinit();
+    }
+
+    // visited set tracks display keys we've already appended to order.
     var visited = std.StringHashMap(void).init(allocator);
     defer {
         var it = visited.keyIterator();
@@ -87,7 +111,9 @@ pub fn planBuild(
             &order,
             &store_hits,
             &store_misses,
+            &instance_keys,
             store,
+            toolchain_fp,
         );
     }
 
@@ -97,6 +123,7 @@ pub fn planBuild(
         .build_order = try order.toOwnedSlice(allocator),
         .store_hits = store_hits,
         .store_misses = store_misses,
+        .instance_keys = instance_keys,
     };
 }
 
@@ -108,7 +135,9 @@ fn dfsVisit(
     order: *std.ArrayList([]u8),
     store_hits: *std.StringHashMap(void),
     store_misses: *std.StringHashMap(void),
+    instance_keys: *std.StringHashMap([]const u8),
     store: *store_mod.Store,
+    toolchain_fp: model.ToolchainFingerprint,
 ) !void {
     const key_text = try std.fmt.allocPrint(allocator, "{s}#{s}", .{
         instance.key.package_id.asText(),
@@ -119,11 +148,14 @@ fn dfsVisit(
     if (visited.contains(key_text)) return;
 
     // Mark visited before recursing to handle cycles gracefully.
+    // Use an ownership flag: once put() succeeds, planBuild's defer owns visited_key.
     const visited_key = try allocator.dupe(u8, key_text);
-    errdefer allocator.free(visited_key);
+    var visited_key_taken = false;
+    errdefer if (!visited_key_taken) allocator.free(visited_key);
     try visited.put(visited_key, {});
+    visited_key_taken = true;
 
-    // Visit deps first.
+    // Visit deps first so their instance_keys entries are populated.
     for (instance.deps) |dep| {
         const dep_key_text = try std.fmt.allocPrint(allocator, "{s}#{s}", .{
             dep.instance.package_id.asText(),
@@ -134,17 +166,89 @@ fn dfsVisit(
         if (visited.contains(dep_key_text)) continue;
 
         if (lockfile.findInstance(dep.instance)) |dep_instance| {
-            try dfsVisit(allocator, lockfile, dep_instance, visited, order, store_hits, store_misses, store);
+            try dfsVisit(
+                allocator,
+                lockfile,
+                dep_instance,
+                visited,
+                order,
+                store_hits,
+                store_misses,
+                instance_keys,
+                store,
+                toolchain_fp,
+            );
         }
     }
 
-    // Append this instance to the order.
-    const order_key = try allocator.dupe(u8, key_text);
-    errdefer allocator.free(order_key);
-    try order.append(allocator, order_key);
+    // Build the dep list for hash computation.
+    // Each dep_hex slice is duped so it remains valid after the loop body frees dep_display.
+    const owned_dep_keys = try allocator.alloc([]u8, instance.deps.len);
+    var owned_dep_count: usize = 0;
+    defer {
+        for (owned_dep_keys[0..owned_dep_count]) |k| allocator.free(k);
+        allocator.free(owned_dep_keys);
+    }
 
-    // Check store.
-    if (store.hasArtifact(key_text)) {
+    const deps_for_hash = try allocator.alloc(instance_key_mod.Dependency, instance.deps.len);
+    defer allocator.free(deps_for_hash);
+
+    for (instance.deps, 0..) |dep, i| {
+        const dep_display = try std.fmt.allocPrint(allocator, "{s}#{s}", .{
+            dep.instance.package_id.asText(),
+            dep.instance.domain.asText(),
+        });
+        defer allocator.free(dep_display);
+
+        // Prefer the already-computed hex key; fall back to the display key.
+        const dep_hex_src = instance_keys.get(dep_display) orelse dep_display;
+        const dep_hex = try allocator.dupe(u8, dep_hex_src);
+        // No errdefer: owned_dep_keys[0..owned_dep_count] defer above handles cleanup.
+        owned_dep_keys[owned_dep_count] = dep_hex;
+        owned_dep_count += 1;
+
+        deps_for_hash[i] = .{
+            .instance_ref = dep.instance,
+            .instance_key = dep_hex,
+        };
+    }
+
+    // Derive the content-addressed store key.
+    // TODO: thread actual optimize mode and linkage through BuildPlan.
+    const hex_digest = instance_key_mod.deriveHex(allocator, .{
+        .package_id = instance.key.package_id,
+        .version = instance.version,
+        .domain = instance.key.domain,
+        .source_hash = instance.source_hash,
+        .selected_options = instance.selected_options,
+        .optimize = .Debug,   // MVP: single debug-native profile
+        .linkage = .static,
+        .toolchain_fingerprint = toolchain_fp,
+        .dependencies = deps_for_hash,
+    }) catch fallbackHex(key_text, toolchain_fp);
+
+    // Store mapping: display_key → hex_digest (both owned by instance_keys).
+    // Use ownership flags: once put() succeeds, planBuild's errdefer owns the pair.
+    const ik_key = try allocator.dupe(u8, key_text);
+    var ik_key_taken = false;
+    errdefer if (!ik_key_taken) allocator.free(ik_key);
+    const hex_str = try allocator.dupe(u8, &hex_digest);
+    var hex_str_taken = false;
+    errdefer if (!hex_str_taken) allocator.free(hex_str);
+    try instance_keys.put(ik_key, hex_str);
+    ik_key_taken = true;
+    hex_str_taken = true;
+
+    // Append display key to build order.
+    // Use ownership flag: once append() succeeds, planBuild's errdefer owns order_key.
+    const order_key = try allocator.dupe(u8, key_text);
+    var order_key_taken = false;
+    errdefer if (!order_key_taken) allocator.free(order_key);
+    try order.append(allocator, order_key);
+    order_key_taken = true;
+
+    // Check store using the content-addressed key.
+    if (store.hasArtifact(hex_str)) {
         const hit_key = try allocator.dupe(u8, key_text);
         errdefer allocator.free(hit_key);
         try store_hits.put(hit_key, {});
@@ -153,6 +257,18 @@ fn dfsVisit(
         errdefer allocator.free(miss_key);
         try store_misses.put(miss_key, {});
     }
+}
+
+/// Produce a deterministic 64-char hex fallback when `deriveHex` cannot run
+/// (e.g. because the lockfile instance has an empty source_hash in a test fixture).
+/// Includes the toolchain fingerprint so artifacts from different toolchains do not
+/// collide even when source_hash is missing.
+fn fallbackHex(display_key: []const u8, toolchain_fp: model.ToolchainFingerprint) std.Build.Cache.HexDigest {
+    var hh: std.Build.Cache.HashHelper = .{};
+    hh.addBytes("zpkg.fallback");
+    hh.addBytes(display_key);
+    toolchain_fingerprint_mod.addToHash(&hh, toolchain_fp) catch {};
+    return hh.final();
 }
 
 pub const BuildExecutor = struct {
@@ -182,30 +298,40 @@ pub const BuildExecutor = struct {
     pub fn deinit(_: *BuildExecutor) void {}
 
     /// Create workspace directory and generate binary adapter for a store-hit instance.
-    fn reifyStoreHit(self: *BuildExecutor, key: []const u8, lockfile: model.Lockfile) !void {
+    ///
+    /// `display_key` is the human-readable `<pkg_id>#<domain>` string used for workspace
+    /// directory names and lockfile lookups.
+    /// `store_key`   is the content-addressed hex-digest used for store operations.
+    fn reifyStoreHit(
+        self: *BuildExecutor,
+        display_key: []const u8,
+        store_key: []const u8,
+        lockfile: model.Lockfile,
+    ) !void {
         const allocator = self.allocator;
 
-        // Find the lockfile instance.
-        const instance_ref = model.lockfile.InstanceRef.parse(key) catch return;
+        // Find the lockfile instance via the human-readable display key.
+        const instance_ref = model.lockfile.InstanceRef.parse(display_key) catch return;
         const instance = lockfile.findInstance(instance_ref) orelse return;
 
-        // Create workspace dep dir.
-        const dest_dir = try self.workspace.depPkgDir(allocator, key);
+        // Create workspace dep dir (named after display key).
+        const dest_dir = try self.workspace.depPkgDir(allocator, display_key);
         defer allocator.free(dest_dir);
         std.Io.Dir.createDirAbsolute(self.io, dest_dir, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
 
-        // Expand artifact to the store's expanded prefix.
-        const expanded = try self.store.expandArtifact(key);
+        // Expand artifact using the content-addressed store key.
+        const expanded = try self.store.expandArtifact(store_key);
         defer allocator.free(expanded);
 
-        // Load artifact manifest.
-        const artifact_manifest = try self.store.loadManifest(key);
+        // Load artifact manifest using the content-addressed store key.
+        const artifact_manifest = try self.store.loadManifest(store_key);
         defer artifact_manifest.deinit(allocator);
 
         // Build dep_map: alias → workspace dep dir for each dep instance.
+        // Workspace dep dirs are keyed by display key.
         var dep_map = realize.DepPathMap.init(allocator);
         defer {
             var it = dep_map.iterator();
@@ -245,16 +371,21 @@ pub const BuildExecutor = struct {
         var any_test_failed = false;
 
         for (plan.build_order) |key| {
+            // Look up the content-addressed store key; fall back to display key if missing.
+            const store_key = plan.instance_keys.get(key) orelse key;
+            // Show first 16 hex chars in logs for readability.
+            const short_key = store_key[0..@min(16, store_key.len)];
+
             if (plan.store_hits.contains(key)) {
                 if (plan.mode == .run_tests) {
-                    try stdout.print("[skip] {s} (pre-built; no test binary)\n", .{key});
+                    try stdout.print("[skip] {s}  {s} (pre-built; no test binary)\n", .{ key, short_key });
                 } else {
-                    try stdout.print("[hit]  {s}\n", .{key});
+                    try stdout.print("[hit]  {s}  {s}\n", .{ key, short_key });
                 }
                 try stdout.flush();
 
                 // Generate binary adapter so downstream source builds can consume it.
-                self.reifyStoreHit(key, lockfile) catch |err| {
+                self.reifyStoreHit(key, store_key, lockfile) catch |err| {
                     try printStderr(self.io, "warning: failed to create binary adapter for '{s}': {s}\n", .{ key, @errorName(err) });
                 };
                 continue;
@@ -270,26 +401,26 @@ pub const BuildExecutor = struct {
                 return error.InstanceNotFound;
             };
 
-            try stdout.print("[build] {s}\n", .{key});
+            try stdout.print("[build] {s}  {s}\n", .{ key, short_key });
             try stdout.flush();
 
-            self.buildInstance(instance, key, lockfile, plan.mode) catch |err| {
+            self.buildInstance(instance, key, store_key, lockfile, plan.mode) catch |err| {
                 if (err == error.TestsFailed) {
                     any_test_failed = true;
-                    try stdout.print("[fail]  {s} (tests failed)\n", .{key});
+                    try stdout.print("[fail]  {s}  {s} (tests failed)\n", .{ key, short_key });
                     try stdout.flush();
                     continue;
                 }
                 return err;
             };
 
-            try stdout.print("[done]  {s}\n", .{key});
+            try stdout.print("[done]  {s}  {s}\n", .{ key, short_key });
             try stdout.flush();
 
             // Artifact is now in the store; replace the source-symlink workspace dir
             // with a binary adapter so downstream packages in this same build run use
             // the prebuilt .a rather than re-processing the source build.zig.
-            self.reifyStoreHit(key, lockfile) catch |err| {
+            self.reifyStoreHit(key, store_key, lockfile) catch |err| {
                 try printStderr(self.io, "warning: failed to reify '{s}' after build: {s}\n", .{ key, @errorName(err) });
             };
         }
@@ -300,7 +431,8 @@ pub const BuildExecutor = struct {
     fn buildInstance(
         self: *BuildExecutor,
         instance: *const model.lockfile.Instance,
-        key: []const u8,
+        display_key: []const u8,
+        store_key: []const u8,
         lockfile: model.Lockfile,
         mode: BuildMode,
     ) !void {
@@ -315,8 +447,8 @@ pub const BuildExecutor = struct {
         const source_dir = try std.Io.Dir.path.join(allocator, &.{ self.pkg_root, "..", pkg_basename });
         defer allocator.free(source_dir);
 
-        // Realized source dir in workspace: deps/<key>/
-        const realized_dir = try self.workspace.depPkgDir(allocator, key);
+        // Realized source dir in workspace: deps/<display_key>/
+        const realized_dir = try self.workspace.depPkgDir(allocator, display_key);
         defer allocator.free(realized_dir);
 
         // Ensure realized dir exists.
@@ -351,12 +483,12 @@ pub const BuildExecutor = struct {
         // Realize source package into workspace.
         var source_realizer = realize.SourcePkgRealize.init(allocator, self.io);
         source_realizer.realize(source_dir, realized_dir, pkg_name, dep_map) catch |err| {
-            try printStderr(self.io, "error: failed to realize source for '{s}': {s}\n", .{ key, @errorName(err) });
+            try printStderr(self.io, "error: failed to realize source for '{s}': {s}\n", .{ display_key, @errorName(err) });
             return error.RealizeFailed;
         };
 
-        // Create staging dir: <workspace_root>/staging/<key>/
-        const staging_dir = try std.Io.Dir.path.join(allocator, &.{ self.workspace.workspace_root, "staging", key });
+        // Create staging dir: <workspace_root>/staging/<display_key>/
+        const staging_dir = try std.Io.Dir.path.join(allocator, &.{ self.workspace.workspace_root, "staging", display_key });
         defer allocator.free(staging_dir);
 
         std.Io.Dir.createDirAbsolute(self.io, staging_dir, .default_dir) catch |err| switch (err) {
@@ -418,12 +550,12 @@ pub const BuildExecutor = struct {
                     switch (term2) {
                         .exited => |code| {
                             if (code != 0) {
-                                try printStderr(self.io, "error: build failed for '{s}' (exit code {d})\n", .{ key, code });
+                                try printStderr(self.io, "error: build failed for '{s}' (exit code {d})\n", .{ display_key, code });
                                 break :build_blk false;
                             }
                         },
                         else => {
-                            try printStderr(self.io, "error: build process for '{s}' terminated abnormally\n", .{key});
+                            try printStderr(self.io, "error: build process for '{s}' terminated abnormally\n", .{display_key});
                             break :build_blk false;
                         },
                     }
@@ -432,14 +564,14 @@ pub const BuildExecutor = struct {
                     // Real build failure; forward captured stderr.
                     try printRaw(self.io, result.stderr);
                     switch (result.term) {
-                        .exited => |code| try printStderr(self.io, "error: build failed for '{s}' (exit code {d})\n", .{ key, code }),
-                        else => try printStderr(self.io, "error: build process for '{s}' terminated abnormally\n", .{key}),
+                        .exited => |code| try printStderr(self.io, "error: build failed for '{s}' (exit code {d})\n", .{ display_key, code }),
+                        else => try printStderr(self.io, "error: build process for '{s}' terminated abnormally\n", .{display_key}),
                     }
                     break :build_blk false;
                 }
             }
             // Exhausted retries.
-            try printStderr(self.io, "error: too many fingerprint correction passes for '{s}'\n", .{key});
+            try printStderr(self.io, "error: too many fingerprint correction passes for '{s}'\n", .{display_key});
             break :build_blk false;
         };
         if (!build_ok) return error.BuildFailed;
@@ -478,7 +610,8 @@ pub const BuildExecutor = struct {
             selected_options_init += 1;
         }
 
-        const instance_ref = try manifest_mod.InstanceRef.parseOwned(allocator, key);
+        // The manifest records the human-readable instance identity (display_key).
+        const instance_ref = try manifest_mod.InstanceRef.parseOwned(allocator, display_key);
         // defer (not errdefer): storeArtifact only reads the manifest; we own instance_ref
         // throughout and must free it regardless of whether storeArtifact succeeds or fails.
         defer instance_ref.deinitOwned(allocator);
@@ -498,7 +631,8 @@ pub const BuildExecutor = struct {
         // All heap fields (instance_ref, source_hash, selected_options, dep_instances) are
         // freed by the defer blocks above when this function exits.
         _ = lockfile; // suppress unused warning
-        try self.store.storeArtifact(key, staging_dir, artifact_manifest);
+        // Use the content-addressed store_key for the store directory name.
+        try self.store.storeArtifact(store_key, staging_dir, artifact_manifest);
 
         // When running in test mode, execute `zig build test --prefix <staging_dir>` as well.
         if (mode == .run_tests) {
@@ -513,12 +647,12 @@ pub const BuildExecutor = struct {
             switch (test_term) {
                 .exited => |code| {
                     if (code != 0) {
-                        try printStderr(self.io, "error: tests failed for '{s}' (exit code {d})\n", .{ key, code });
+                        try printStderr(self.io, "error: tests failed for '{s}' (exit code {d})\n", .{ display_key, code });
                         return error.TestsFailed;
                     }
                 },
                 else => {
-                    try printStderr(self.io, "error: test process for '{s}' terminated abnormally\n", .{key});
+                    try printStderr(self.io, "error: test process for '{s}' terminated abnormally\n", .{display_key});
                     return error.TestsFailed;
                 },
             }
@@ -692,7 +826,20 @@ test "planBuild topological order: leaves before parents" {
     var store = try store_mod.Store.init(allocator, io, "/tmp");
     defer store.deinit();
 
-    var plan = try planBuild(allocator, lockfile, &store, .build);
+    // Use a sample fingerprint (source_hashes are empty so keys will use the fallback path).
+    const sample_fp = model.ToolchainFingerprint{
+        .zig_version = "0.16.0",
+        .host_triple = "x86_64-linux-gnu",
+        .target_triple = "x86_64-linux-gnu",
+        .c_compiler = .{ .id = "gcc", .version = "13.0.0" },
+        .cxx_compiler = .{ .id = "g++", .version = "13.0.0" },
+        .sysroot = .{ .id = "system", .version = "unknown" },
+        .libc = .{ .id = "system", .version = "unknown" },
+        .cxx_stdlib = .{ .id = "system", .version = "unknown" },
+        .cxx_abi_mode = "unknown",
+    };
+
+    var plan = try planBuild(allocator, lockfile, &store, .build, sample_fp);
     defer plan.deinit();
 
     // The plan should have both instances.
