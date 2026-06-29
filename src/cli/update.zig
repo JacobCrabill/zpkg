@@ -39,7 +39,8 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     // Check if dry-run
     const dry_run = args.len == 4 and std.mem.eql(u8, args[3], "--dry-run");
 
-    // Resolve the package root to an absolute path so lockfile source_path values are absolute.
+    // Resolve the package root to an absolute path so it serves as the base for computing
+    // relative source_path values in the lockfile.
     const pkg_root = diag_util.resolveAbsPath(allocator, pkg_root_raw) catch |err| {
         try writeStderrFmt(io, "error: cannot resolve path '{s}': {s}\n", .{ pkg_root_raw, @errorName(err) });
         return error.InvalidArgument;

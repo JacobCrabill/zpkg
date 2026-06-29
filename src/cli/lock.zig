@@ -33,7 +33,8 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     const allocator = std.heap.page_allocator;
     const pkg_root_raw = args[2];
 
-    // Resolve the package root to an absolute path so lockfile source_path values are absolute.
+    // Resolve the package root to an absolute path so it serves as the base for computing
+    // relative source_path values in the lockfile.
     const pkg_root = diag.resolveAbsPath(allocator, pkg_root_raw) catch |err| {
         try writeStderrFmt(io, "error: cannot resolve path '{s}': {s}\n", .{ pkg_root_raw, @errorName(err) });
         return error.InvalidArgument;
