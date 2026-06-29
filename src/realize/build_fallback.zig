@@ -5,6 +5,7 @@ const realize = @import("root.zig");
 const manifest_mod = @import("../store/manifest.zig");
 const instance_key_mod = @import("../hash/instance_key.zig");
 const toolchain_fingerprint_mod = @import("../hash/toolchain_fingerprint.zig");
+const source_hash_mod = @import("../hash/source_hash.zig");
 
 pub const BuildMode = enum { build, build_with_tests, run_tests };
 
@@ -397,6 +398,8 @@ pub const BuildExecutor = struct {
     lockfile_dir: []const u8,
     /// Maximum number of concurrent build jobs (1 = serial).
     max_jobs: usize,
+    /// When true, source drift is a hard error instead of a warning+rebuild.
+    strict_lockfile: bool,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -406,6 +409,7 @@ pub const BuildExecutor = struct {
         pkg_root: []const u8,
         lockfile_dir: []const u8,
         max_jobs: usize,
+        strict_lockfile: bool,
     ) BuildExecutor {
         return .{
             .allocator = allocator,
@@ -415,6 +419,7 @@ pub const BuildExecutor = struct {
             .pkg_root = pkg_root,
             .lockfile_dir = lockfile_dir,
             .max_jobs = if (max_jobs == 0) 1 else max_jobs,
+            .strict_lockfile = strict_lockfile,
         };
     }
 
@@ -495,10 +500,53 @@ pub const BuildExecutor = struct {
         var any_test_failed = false;
         var stdout_mutex: std.Io.Mutex = .init;
 
+        // Pre-pass: detect source drift for all store hits before processing any waves.
+        // Keys stored in `drifted` are borrowed from plan.build_order (valid for execute's lifetime).
+        var drifted = std.StringHashMap(void).init(allocator);
+        defer drifted.deinit();
+
+        for (plan.waves) |wave| {
+            for (wave) |key| {
+                if (!plan.store_hits.contains(key)) continue;
+
+                const instance_ref = model.lockfile.InstanceRef.parse(key) catch continue;
+                const inst = lockfile.findInstance(instance_ref) orelse continue;
+
+                if (inst.source_path.len == 0 or inst.source_hash.len == 0) continue;
+                if (!std.fs.path.isAbsolute(inst.source_path)) continue;
+
+                const src_dir = std.Io.Dir.openDirAbsolute(self.io, inst.source_path, .{}) catch continue;
+                defer src_dir.close(self.io);
+
+                const actual_hex = source_hash_mod.hashPackageSource(allocator, src_dir, self.io, 1) catch continue;
+
+                if (!std.mem.eql(u8, &actual_hex, inst.source_hash)) {
+                    if (self.strict_lockfile) {
+                        try printStderr(self.io,
+                            "error: {s}: source has changed since last 'zpkg update'\n" ++
+                            "       lockfile hash: {s}\n" ++
+                            "       actual hash:   {s}\n" ++
+                            "       Run 'zpkg update' to update the lockfile.\n",
+                            .{ key, inst.source_hash, actual_hex });
+                        return error.SourceDrift;
+                    } else {
+                        try printStderr(self.io,
+                            "warning: {s}: source has changed since last 'zpkg update'\n" ++
+                            "         lockfile hash: {s}\n" ++
+                            "         actual hash:   {s}\n" ++
+                            "         Forcing rebuild. Run 'zpkg update' to update the lockfile.\n",
+                            .{ key, inst.source_hash, actual_hex });
+                        try drifted.put(key, {});
+                    }
+                }
+            }
+        }
+
         for (plan.waves) |wave| {
             // 1. Handle store hits in this wave serially (fast, no build work needed).
             for (wave) |key| {
                 if (!plan.store_hits.contains(key)) continue;
+                if (drifted.contains(key)) continue; // drift detected: rebuild in miss pass below
                 const store_key = plan.instance_keys.get(key) orelse key;
                 const short_key = store_key[0..@min(16, store_key.len)];
 
@@ -515,10 +563,11 @@ pub const BuildExecutor = struct {
             }
 
             // 2. Collect store misses in this wave for parallel dispatch.
+            // Also include drifted keys (store hits whose source has changed).
             var miss_keys: std.ArrayList([]const u8) = .empty;
             defer miss_keys.deinit(allocator);
             for (wave) |key| {
-                if (plan.store_misses.contains(key)) try miss_keys.append(allocator, key);
+                if (plan.store_misses.contains(key) or drifted.contains(key)) try miss_keys.append(allocator, key);
             }
             if (miss_keys.items.len == 0) continue;
 

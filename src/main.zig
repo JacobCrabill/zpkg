@@ -12,6 +12,7 @@ pub fn main(init: std.process.Init) !void {
         error.LockfileExists,
         error.LockfileMismatch,
         error.TestsFailed,
+        error.SourceDrift,
         => std.process.exit(1),
         else => return err,
     };

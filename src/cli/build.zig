@@ -10,18 +10,20 @@ pub const help_text =
     \\zpkg build — Build all instances from the lockfile
     \\
     \\Usage:
-    \\  zpkg build <pkg-root> [--with-tests] [--jobs N]
+    \\  zpkg build <pkg-root> [--with-tests] [--jobs N] [--strict-lockfile]
     \\
     \\Arguments:
-    \\  <pkg-root>     Path to the package directory containing zpkg.lock.zon
+    \\  <pkg-root>        Path to the package directory containing zpkg.lock.zon
     \\
     \\Options:
-    \\  --with-tests   Also build test instances
-    \\  --jobs N       Maximum number of parallel build jobs (default: CPU count; 1 for serial)
+    \\  --with-tests      Also build test instances
+    \\  --jobs N          Maximum number of parallel build jobs (default: CPU count; 1 for serial)
+    \\  --strict-lockfile Treat source drift as a hard error (default: warn and rebuild)
     \\
     \\Example:
     \\  zpkg build .
     \\  zpkg build . --jobs 1
+    \\  zpkg build . --strict-lockfile
     \\
 ;
 
@@ -29,6 +31,7 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     var with_tests = false;
     var pkg_root: ?[]const u8 = null;
     var max_jobs: ?usize = null;
+    var strict_lockfile = false;
 
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
@@ -41,6 +44,8 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
             return;
         } else if (std.mem.eql(u8, args[i], "--with-tests")) {
             with_tests = true;
+        } else if (std.mem.eql(u8, args[i], "--strict-lockfile")) {
+            strict_lockfile = true;
         } else if (std.mem.eql(u8, args[i], "--jobs")) {
             i += 1;
             if (i >= args.len) {
@@ -71,10 +76,10 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
 
     const mode: build_fallback.BuildMode = if (with_tests) .build_with_tests else .build;
 
-    try runBuild(root, mode, io, max_jobs);
+    try runBuild(root, mode, io, max_jobs, strict_lockfile);
 }
 
-pub fn runBuild(pkg_root: []const u8, mode: build_fallback.BuildMode, io: std.Io, max_jobs_override: ?usize) !void {
+pub fn runBuild(pkg_root: []const u8, mode: build_fallback.BuildMode, io: std.Io, max_jobs_override: ?usize, strict_lockfile: bool) !void {
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -161,7 +166,7 @@ pub fn runBuild(pkg_root: []const u8, mode: build_fallback.BuildMode, io: std.Io
     const max_jobs = max_jobs_override orelse (std.Thread.getCpuCount() catch 4);
 
     // Execute plan.
-    var executor = build_fallback.BuildExecutor.init(allocator, io, &store, &layout, abs_root, abs_root, max_jobs);
+    var executor = build_fallback.BuildExecutor.init(allocator, io, &store, &layout, abs_root, abs_root, max_jobs, strict_lockfile);
     defer executor.deinit();
 
     try executor.execute(plan, lockfile);

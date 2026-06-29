@@ -6,23 +6,26 @@ pub const help_text =
     \\zpkg test — Build and run all test instances
     \\
     \\Usage:
-    \\  zpkg test <pkg-root> [--jobs N]
+    \\  zpkg test <pkg-root> [--jobs N] [--strict-lockfile]
     \\
     \\Arguments:
-    \\  <pkg-root>   Path to the package directory containing zpkg.lock.zon
+    \\  <pkg-root>        Path to the package directory containing zpkg.lock.zon
     \\
     \\Options:
-    \\  --jobs N     Maximum number of parallel build jobs (default: CPU count; 1 for serial)
+    \\  --jobs N          Maximum number of parallel build jobs (default: CPU count; 1 for serial)
+    \\  --strict-lockfile Treat source drift as a hard error (default: warn and rebuild)
     \\
     \\Example:
     \\  zpkg test .
     \\  zpkg test . --jobs 1
+    \\  zpkg test . --strict-lockfile
     \\
 ;
 
 pub fn run(args: []const []const u8, io: std.Io) !void {
     var pkg_root: ?[]const u8 = null;
     var max_jobs: ?usize = null;
+    var strict_lockfile = false;
 
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
@@ -33,6 +36,8 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
             try w.writeAll(help_text);
             try w.flush();
             return;
+        } else if (std.mem.eql(u8, args[i], "--strict-lockfile")) {
+            strict_lockfile = true;
         } else if (std.mem.eql(u8, args[i], "--jobs")) {
             i += 1;
             if (i >= args.len) {
@@ -78,5 +83,5 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
         return error.InvalidArgument;
     };
 
-    try build_cmd.runBuild(root, .run_tests, io, max_jobs);
+    try build_cmd.runBuild(root, .run_tests, io, max_jobs, strict_lockfile);
 }

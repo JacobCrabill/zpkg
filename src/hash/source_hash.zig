@@ -139,7 +139,7 @@ fn hashPaths(
             const stat = std.Io.Dir.statFile(package_root_dir, io, full_path, .{}) catch continue;
 
             if (stat.kind == .directory) {
-                hashDirectory(package_root_dir, io, full_path, &hash_helper) catch return error.OutOfMemory;
+                hashDirectory(allocator, package_root_dir, io, full_path, &hash_helper) catch return error.OutOfMemory;
             } else {
                 hashFile(allocator, package_root_dir, io, full_path, &hash_helper);
             }
@@ -150,18 +150,43 @@ fn hashPaths(
 }
 
 fn hashDirectory(
+    allocator: std.mem.Allocator,
     dir: std.Io.Dir,
     io: std.Io,
     path: []const u8,
     hash_helper: *std.Build.Cache.HashHelper,
 ) SourceHashError!void {
-    const subdir = dir.openDir(io, path, .{}) catch return;
+    const subdir = dir.openDir(io, path, .{ .iterate = true }) catch return;
     defer subdir.close(io);
 
-    // For now, just record that we hashed a directory
-    hash_helper.addBytes(path);
+    // Collect all file paths recursively for deterministic ordering.
+    var file_paths: std.ArrayList([]u8) = .empty;
+    defer {
+        for (file_paths.items) |p| allocator.free(p);
+        file_paths.deinit(allocator);
+    }
 
-    // TODO: Add directory traversal here
+    var walker = subdir.walk(allocator) catch return error.OutOfMemory;
+    defer walker.deinit();
+
+    while (walker.next(io) catch null) |entry| {
+        if (entry.kind != .file) continue;
+        // entry.path becomes invalid after the next call, so copy it.
+        const p = allocator.dupe(u8, entry.path) catch return error.OutOfMemory;
+        file_paths.append(allocator, p) catch {
+            allocator.free(p);
+            return error.OutOfMemory;
+        };
+    }
+
+    // Sort for deterministic ordering.
+    std.mem.sort([]u8, file_paths.items, {}, sortMutPaths);
+
+    // Hash each file's relative path and content.
+    for (file_paths.items) |file_path| {
+        hash_helper.addBytes(file_path);
+        hashFile(allocator, subdir, io, file_path, hash_helper);
+    }
 }
 
 fn hashFile(
@@ -177,6 +202,10 @@ fn hashFile(
 }
 
 fn sortPaths(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.order(u8, a, b) == .lt;
+}
+
+fn sortMutPaths(_: void, a: []u8, b: []u8) bool {
     return std.mem.order(u8, a, b) == .lt;
 }
 
