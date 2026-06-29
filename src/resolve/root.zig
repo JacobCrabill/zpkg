@@ -13,6 +13,7 @@ pub const ResolverError = error{
     OptionNotDeclared,
     OptionTypeMismatch,
     DependencyManifestNotFound,
+    MissingSourcePath,
 };
 
 pub const Resolver = struct {
@@ -23,6 +24,8 @@ pub const Resolver = struct {
     package_cache: PackageCache,
     source_root: []const u8,
     io: std.Io,
+    /// Maps "<pkg_id>#<domain>" → absolute source directory path (owned strings).
+    source_dirs: std.StringHashMap([]u8),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -48,18 +51,38 @@ pub const Resolver = struct {
             .package_cache = PackageCache.init(allocator),
             .source_root = source_root,
             .io = io,
+            .source_dirs = std.StringHashMap([]u8).init(allocator),
         };
     }
 
     pub fn deinit(self: *Resolver) void {
         self.resolved.deinit();
         self.package_cache.deinit();
+        var vit = self.source_dirs.valueIterator();
+        while (vit.next()) |v| self.allocator.free(v.*);
+        var kit = self.source_dirs.keyIterator();
+        while (kit.next()) |k| self.allocator.free(k.*);
+        self.source_dirs.deinit();
     }
 
     pub fn resolveRoot(
         self: *Resolver,
         root_manifest: model.PackageManifest,
     ) (ResolverError || std.mem.Allocator.Error)!ResolvedRoot {
+        // Record the root package's source directory before resolving.
+        // Use catch instead of errdefer so we don't double-free after map takes ownership.
+        const root_key = try std.fmt.allocPrint(self.allocator, "{s}#target", .{root_manifest.package.id.asText()});
+        const root_dir = self.allocator.dupe(u8, self.source_root) catch {
+            self.allocator.free(root_key);
+            return error.OutOfMemory;
+        };
+        self.source_dirs.put(root_key, root_dir) catch {
+            self.allocator.free(root_dir);
+            self.allocator.free(root_key);
+            return error.OutOfMemory;
+        };
+        // root_key and root_dir are now owned by source_dirs; deinit() will free them.
+
         _ = try self.resolvePackage(.{
             .package_id = root_manifest.package.id,
             .version = root_manifest.package.version,
@@ -142,6 +165,14 @@ pub const Resolver = struct {
             self.allocator.free(manifests);
         }
 
+        // Look up the current package's source directory.
+        // Keys are always "#target" since source_path is a single path regardless of domain.
+        const current_key = try std.fmt.allocPrint(self.allocator, "{s}#target", .{
+            pkg.package_id.asText(),
+        });
+        defer self.allocator.free(current_key);
+        const current_source_dir = self.source_dirs.get(current_key) orelse self.source_root;
+
         for (pkg.manifest.deps) |dep| {
             // Check if the dependency condition is satisfied
             if (dep.when) |condition| {
@@ -161,8 +192,8 @@ pub const Resolver = struct {
                 continue;
             }
 
-            // Parse the dependency manifest (stub: returns minimal manifest)
-            const dep_manifest = try self.parseDependencyManifest(dep);
+            // Parse the dependency manifest using the explicit source_path.
+            const dep_manifest = try self.parseDependencyManifest(dep, current_source_dir);
 
             // Cache takes ownership of cache_key.
             self.package_cache.put(cache_key, dep_manifest);
@@ -179,26 +210,49 @@ pub const Resolver = struct {
         return trimmed;
     }
 
-    fn parseDependencyManifest(self: *Resolver, dep: model.Dependency) !model.PackageManifest {
-        const pkg_id_text = dep.package.asText();
-        const basename = if (std.mem.lastIndexOfScalar(u8, pkg_id_text, '.')) |dot|
-            pkg_id_text[dot + 1 ..]
-        else
-            pkg_id_text;
+    fn parseDependencyManifest(self: *Resolver, dep: model.Dependency, current_source_dir: []const u8) !model.PackageManifest {
+        const sp = dep.source_path orelse {
+            std.log.err("zpkg: dependency '{s}' (package '{s}') has no source_path.\n" ++
+                "Add .source_path = \"<relative-path>\" to the deps.{s} entry in zpkg.zon.", .{
+                dep.alias, dep.package.asText(), dep.alias,
+            });
+            return error.MissingSourcePath;
+        };
 
-        const dep_dir_path = try std.Io.Dir.path.join(self.allocator, &.{ self.source_root, "..", basename });
-        defer self.allocator.free(dep_dir_path);
+        const abs_dep_dir = try std.fs.path.resolve(self.allocator, &.{ current_source_dir, sp });
+        defer self.allocator.free(abs_dep_dir);
 
-        var dep_dir = std.Io.Dir.cwd().openDir(self.io, dep_dir_path, .{}) catch {
-            std.log.err("zpkg: dependency manifest not found at '{s}/zpkg.zon'", .{dep_dir_path});
+        var dep_dir = std.Io.Dir.cwd().openDir(self.io, abs_dep_dir, .{}) catch {
+            std.log.err("zpkg: dependency manifest not found at '{s}/zpkg.zon'", .{abs_dep_dir});
             return error.DependencyManifestNotFound;
         };
         defer dep_dir.close(self.io);
 
-        return schema.parseFileAlloc(self.allocator, dep_dir, self.io, "zpkg.zon") catch {
-            std.log.err("zpkg: failed to parse dependency manifest at '{s}/zpkg.zon'", .{dep_dir_path});
+        var dep_manifest = schema.parseFileAlloc(self.allocator, dep_dir, self.io, "zpkg.zon") catch {
+            std.log.err("zpkg: failed to parse dependency manifest at '{s}/zpkg.zon'", .{abs_dep_dir});
             return error.DependencyManifestNotFound;
         };
+        errdefer dep_manifest.deinitOwned(self.allocator);
+
+        // Store the resolved absolute source directory for this dep, keyed as "<pkg_id>#target".
+        // Use catch blocks (not errdefer) to avoid freeing after map takes ownership.
+        const dir_key = try std.fmt.allocPrint(self.allocator, "{s}#target", .{dep.package.asText()});
+        if (!self.source_dirs.contains(dir_key)) {
+            const dir_owned = self.allocator.dupe(u8, abs_dep_dir) catch {
+                self.allocator.free(dir_key);
+                return error.OutOfMemory;
+            };
+            self.source_dirs.put(dir_key, dir_owned) catch {
+                self.allocator.free(dir_owned);
+                self.allocator.free(dir_key);
+                return error.OutOfMemory;
+            };
+            // dir_key and dir_owned ownership transferred to map.
+        } else {
+            self.allocator.free(dir_key);
+        }
+
+        return dep_manifest;
     }
 };
 

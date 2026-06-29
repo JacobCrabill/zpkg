@@ -438,14 +438,12 @@ pub const BuildExecutor = struct {
     ) !void {
         const allocator = self.allocator;
 
-        // Determine source directory: <pkg_root>/../<basename_of_package_id>
-        const pkg_name = instance.package_id.asText();
-        const pkg_basename = if (std.mem.lastIndexOfScalar(u8, pkg_name, '.')) |dot_idx|
-            pkg_name[dot_idx + 1 ..]
-        else
-            pkg_name;
-        const source_dir = try std.Io.Dir.path.join(allocator, &.{ self.pkg_root, "..", pkg_basename });
-        defer allocator.free(source_dir);
+        // Use the lockfile-recorded source path directly.
+        if (instance.source_path.len == 0) {
+            try printStderr(self.io, "error: '{s}' has no source_path in lockfile; re-run 'zpkg lock'\n", .{display_key});
+            return error.MissingSourcePath;
+        }
+        const source_dir = instance.source_path; // borrowed, no allocation needed
 
         // Realized source dir in workspace: deps/<display_key>/
         const realized_dir = try self.workspace.depPkgDir(allocator, display_key);
@@ -482,7 +480,7 @@ pub const BuildExecutor = struct {
 
         // Realize source package into workspace.
         var source_realizer = realize.SourcePkgRealize.init(allocator, self.io);
-        source_realizer.realize(source_dir, realized_dir, pkg_name, dep_map) catch |err| {
+        source_realizer.realize(source_dir, realized_dir, instance.package_id.asText(), dep_map) catch |err| {
             try printStderr(self.io, "error: failed to realize source for '{s}': {s}\n", .{ display_key, @errorName(err) });
             return error.RealizeFailed;
         };
@@ -785,6 +783,8 @@ test "planBuild topological order: leaves before parents" {
 
     const lib_source_hash = try allocator.dupe(u8, "");
     const root_source_hash = try allocator.dupe(u8, "");
+    const root_source_path = try allocator.dupe(u8, "/fake/root");
+    const lib_source_path = try allocator.dupe(u8, "/fake/lib");
 
     const instances = try allocator.alloc(model.lockfile.Instance, 2);
     instances[0] = .{
@@ -793,6 +793,7 @@ test "planBuild topological order: leaves before parents" {
         .domain = .target,
         .version = .{ .major = 0, .minor = 1, .patch = 0, .revision = 0 },
         .source_hash = root_source_hash,
+        .source_path = root_source_path,
         .selected_options = root_options,
         .deps = root_deps,
     };
@@ -802,6 +803,7 @@ test "planBuild topological order: leaves before parents" {
         .domain = .target,
         .version = .{ .major = 0, .minor = 1, .patch = 0, .revision = 0 },
         .source_hash = lib_source_hash,
+        .source_path = lib_source_path,
         .selected_options = lib_options,
         .deps = lib_deps,
     };

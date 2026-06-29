@@ -99,7 +99,7 @@ fn parseInstanceAlloc(
 ) ParseError!lockfile_model.Instance {
     errdefer key.deinitOwned(allocator);
     const object = try zon_util.Object.fromNode(doc, node);
-    try object.validateOnlyFields(&.{ "package", "domain", "version", "source_hash", "selected_options", "deps" });
+    try object.validateOnlyFields(&.{ "package", "domain", "version", "source_hash", "source_path", "selected_options", "deps" });
 
     const package_text = try zon_util.parseNonEmptyStringAlloc(allocator, doc, try object.require("package"));
     errdefer allocator.free(package_text);
@@ -107,6 +107,12 @@ fn parseInstanceAlloc(
     defer allocator.free(version_text);
     const source_hash = try zon_util.parseNonEmptyStringAlloc(allocator, doc, try object.require("source_hash"));
     errdefer allocator.free(source_hash);
+    const source_path_node = object.get("source_path") orelse {
+        std.log.err("zpkg: lockfile instance is missing 'source_path'; re-run 'zpkg lock' to regenerate the lockfile", .{});
+        return error.MissingField;
+    };
+    const source_path = try zon_util.parseNonEmptyStringAlloc(allocator, doc, source_path_node);
+    errdefer allocator.free(source_path);
 
     const package_id = model.PackageId.adoptOwned(package_text) catch return error.InvalidPackageId;
     errdefer package_id.deinitOwned(allocator);
@@ -135,6 +141,7 @@ fn parseInstanceAlloc(
         .domain = domain,
         .version = version,
         .source_hash = source_hash,
+        .source_path = source_path,
         .selected_options = selected_options,
         .deps = deps,
     };
@@ -231,6 +238,7 @@ test "parse lockfile and preserve dependency aliases" {
         \\            .domain = .target,
         \\            .version = "0.1.0",
         \\            .source_hash = "root-hash",
+        \\            .source_path = "/fake/app",
         \\            .selected_options = .{
         \\                .shared = true,
         \\            },
@@ -244,6 +252,7 @@ test "parse lockfile and preserve dependency aliases" {
         \\            .domain = .target,
         \\            .version = "0.1.0.0",
         \\            .source_hash = "lib-hash",
+        \\            .source_path = "/fake/lib",
         \\            .selected_options = .{},
         \\            .deps = .{},
         \\        },
@@ -252,6 +261,7 @@ test "parse lockfile and preserve dependency aliases" {
         \\            .domain = .host,
         \\            .version = "0.1.0.0",
         \\            .source_hash = "tool-hash",
+        \\            .source_path = "/fake/tool",
         \\            .selected_options = .{},
         \\            .deps = .{},
         \\        },
@@ -279,6 +289,7 @@ test "reject missing referenced lockfile instance" {
         \\            .domain = .target,
         \\            .version = "0.1.0.0",
         \\            .source_hash = "root-hash",
+        \\            .source_path = "/fake/app",
         \\            .selected_options = .{},
         \\            .deps = .{ .missing = "zpkg.example.hello_lib#target" },
         \\        },
@@ -300,6 +311,7 @@ test "reject instance key mismatch" {
         \\            .domain = .target,
         \\            .version = "0.1.0.0",
         \\            .source_hash = "root-hash",
+        \\            .source_path = "/fake/app",
         \\            .selected_options = .{},
         \\            .deps = .{},
         \\        },
@@ -322,6 +334,7 @@ test "lockfile golden normalized zon" {
         \\            .domain = .target,
         \\            .version = "0.1.0",
         \\            .source_hash = "root-hash",
+        \\            .source_path = "/fake/app",
         \\            .selected_options = .{ .shared = true },
         \\            .deps = .{ .hello_lib = "zpkg.example.hello_lib#target" },
         \\        },
@@ -330,6 +343,7 @@ test "lockfile golden normalized zon" {
         \\            .domain = .target,
         \\            .version = "0.1.0",
         \\            .source_hash = "lib-hash",
+        \\            .source_path = "/fake/lib",
         \\            .selected_options = .{},
         \\            .deps = .{},
         \\        },

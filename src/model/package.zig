@@ -58,6 +58,9 @@ pub const Dependency = struct {
     package: PackageId,
     require: VersionRequirement,
     when: ?conditions.Condition = null,
+    /// Relative path to the dependency's source directory, relative to the
+    /// declaring package's zpkg.zon file location.
+    source_path: ?[]const u8 = null,
 
     pub fn deinitOwned(self: *Dependency, allocator: std.mem.Allocator) void {
         allocator.free(self.alias);
@@ -66,6 +69,7 @@ pub const Dependency = struct {
             condition.deinitOwned(allocator);
             self.when = null;
         }
+        if (self.source_path) |sp| allocator.free(sp);
     }
 };
 

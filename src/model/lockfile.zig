@@ -73,6 +73,8 @@ pub const Instance = struct {
     domain: model.Domain,
     version: model.Version,
     source_hash: []const u8,
+    /// Absolute path to the source directory at lock time.
+    source_path: []const u8,
     selected_options: []model.NamedOptionValue,
     deps: []Dependency,
     /// The name of the specific build target within the package, if known.
@@ -84,6 +86,7 @@ pub const Instance = struct {
         self.package_id.deinitOwned(allocator);
         if (self.target_name) |tn| allocator.free(tn);
         allocator.free(self.source_hash);
+        allocator.free(self.source_path);
         for (self.selected_options) |entry| {
             allocator.free(entry.name);
             entry.value.deinitOwned(allocator);
@@ -183,6 +186,10 @@ pub const Lockfile = struct {
             try zon_util.writeIndent(writer, 3);
             try writer.writeAll(".source_hash = ");
             try zon_util.writeString(writer, instance.source_hash);
+            try writer.writeAll(",\n");
+            try zon_util.writeIndent(writer, 3);
+            try writer.writeAll(".source_path = ");
+            try zon_util.writeString(writer, instance.source_path);
             try writer.writeAll(",\n");
 
             const sorted_options = try sortedNamedOptionValuesAlloc(allocator, instance.selected_options);

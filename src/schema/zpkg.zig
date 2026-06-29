@@ -49,6 +49,8 @@ pub const ParseError = error{
     DuplicateTargetName,
     DuplicateConditionOption,
     DuplicateField,
+    EmptySourcePath,
+    AbsoluteSourcePath,
 };
 
 pub fn formatDiagnosticAlloc(allocator: std.mem.Allocator, file_path: []const u8, err: ParseError) ![]u8 {
@@ -104,6 +106,8 @@ fn parseErrorIssue(err: ParseError) []const u8 {
         error.DuplicateTargetName => "a target name is declared more than once",
         error.DuplicateConditionOption => "a .when.options key is declared more than once",
         error.DuplicateField => "a field is declared more than once in the same object",
+        error.EmptySourcePath => ".deps.<alias>.source_path must be a non-empty string",
+        error.AbsoluteSourcePath => ".deps.<alias>.source_path must be a relative path, not an absolute one",
     };
 }
 
@@ -128,7 +132,7 @@ fn parseErrorHelp(err: ParseError) []const u8 {
         error.UnknownTopLevelField => "allowed top-level fields are .schema, .package, .options, .deps, and .targets",
         error.UnknownPackageField => "allowed .package fields are .name, .id, .version, and .backend",
         error.UnknownOptionField => "allowed .options.<name> fields are .kind, .default, and .abi",
-        error.UnknownDependencyField => "allowed .deps.<alias> fields are .package, .require, and .when",
+        error.UnknownDependencyField => "allowed .deps.<alias> fields are .package, .require, .when, and .source_path",
         error.UnknownRequirementField => "allowed .deps.<alias>.require fields are only .version in Phase 01",
         error.UnknownTargetField => "allowed .targets.<name> fields are .kind, .linkage, .test_only, and .when",
         error.UnknownConditionField => "allowed .when fields are .domain, .host_os, .host_arch, .target_os, .target_arch, and .options",
@@ -144,6 +148,8 @@ fn parseErrorHelp(err: ParseError) []const u8 {
         error.ConditionOptionTypeMismatch => "make the .when.options value type match the option kind declared in .options",
         error.FieldNotAllowed => "remove the unsupported field from the manifest",
         error.DuplicateTopLevelField, error.DuplicateOptionName, error.DuplicateDependencyAlias, error.DuplicateTargetName, error.DuplicateConditionOption, error.DuplicateField => "remove the duplicate field so each key appears only once in its object",
+        error.EmptySourcePath => "provide a non-empty relative path, e.g. .source_path = \"../my_dep\"",
+        error.AbsoluteSourcePath => "use a relative path like \"../my_dep\" instead of an absolute path",
     };
 }
 
@@ -611,6 +617,9 @@ fn parseDependency(allocator: std.mem.Allocator, source: [:0]const u8, ast: Ast,
     var when: ?model.Condition = null;
     errdefer if (when) |*condition| condition.deinitOwned(allocator);
 
+    var source_path: ?[]const u8 = null;
+    errdefer if (source_path) |sp| allocator.free(sp);
+
     for (0..node.names.len) |index| {
         const field_name = node.names[index].get(zoir);
         const value_idx = node.vals.at(@intCast(index));
@@ -627,6 +636,10 @@ fn parseDependency(allocator: std.mem.Allocator, source: [:0]const u8, ast: Ast,
             require = try parseRequire(allocator, zoir, value_idx);
         } else if (std.mem.eql(u8, field_name, "when")) {
             when = try parseCondition(allocator, source, ast, zoir, value_idx, option_definitions);
+        } else if (std.mem.eql(u8, field_name, "source_path")) {
+            source_path = try parseOwnedString(allocator, zoir, value_idx);
+            if (source_path.?.len == 0) return error.EmptySourcePath;
+            if (std.fs.path.isAbsolute(source_path.?)) return error.AbsoluteSourcePath;
         } else if (std.mem.eql(u8, field_name, "required")) {
             return error.FieldNotAllowed;
         } else {
@@ -642,6 +655,7 @@ fn parseDependency(allocator: std.mem.Allocator, source: [:0]const u8, ast: Ast,
         .package = package_id orelse return error.MissingDependencyPackageId,
         .require = require orelse return error.MissingDependencyVersionRequirement,
         .when = when,
+        .source_path = source_path,
     };
 }
 

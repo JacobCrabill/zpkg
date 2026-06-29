@@ -12,10 +12,12 @@
         .libA = .{
             .package = "diamond.libA",
             .require = .{ .version = "=0.1.0.0" },
+            .source_path = "../libA",
         },
         .libB = .{
             .package = "diamond.libB",
             .require = .{ .version = "=0.1.0.0" },
+            .source_path = "../libB",
         },
     },
 

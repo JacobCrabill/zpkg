@@ -240,6 +240,7 @@ test "planExport: filters by domain and test heuristic" {
         .domain = .target,
         .version = .{ .major = 1, .minor = 0, .patch = 0, .revision = 0 },
         .source_hash = "sha256:aabb",
+        .source_path = "/fake/foo",
         .selected_options = &.{},
         .deps = &.{},
     };
@@ -249,6 +250,7 @@ test "planExport: filters by domain and test heuristic" {
         .domain = .target,
         .version = .{ .major = 1, .minor = 0, .patch = 0, .revision = 0 },
         .source_hash = "sha256:ccdd",
+        .source_path = "/fake/foo_test",
         .selected_options = &.{},
         .deps = &.{},
     };
@@ -258,6 +260,7 @@ test "planExport: filters by domain and test heuristic" {
         .domain = .host,
         .version = .{ .major = 1, .minor = 0, .patch = 0, .revision = 0 },
         .source_hash = "sha256:eeff",
+        .source_path = "/fake/foo_host",
         .selected_options = &.{},
         .deps = &.{},
     };
@@ -298,6 +301,7 @@ test "planExport: include_tests includes test-suffixed instances" {
         .domain = .target,
         .version = .{ .major = 0, .minor = 1, .patch = 0, .revision = 0 },
         .source_hash = "sha256:1111",
+        .source_path = "/fake/bar",
         .selected_options = &.{},
         .deps = &.{},
     };
@@ -307,6 +311,7 @@ test "planExport: include_tests includes test-suffixed instances" {
         .domain = .target,
         .version = .{ .major = 0, .minor = 1, .patch = 0, .revision = 0 },
         .source_hash = "sha256:2222",
+        .source_path = "/fake/bar_test",
         .selected_options = &.{},
         .deps = &.{},
     };
@@ -347,6 +352,7 @@ test "planExport: named target filters by target_name" {
         .domain = .target,
         .version = .{ .major = 1, .minor = 0, .patch = 0, .revision = 0 },
         .source_hash = "sha256:aaaa",
+        .source_path = "/fake/multi",
         .selected_options = &.{},
         .deps = &.{},
         .target_name = "lib",
@@ -357,6 +363,7 @@ test "planExport: named target filters by target_name" {
         .domain = .target,
         .version = .{ .major = 1, .minor = 0, .patch = 0, .revision = 0 },
         .source_hash = "sha256:bbbb",
+        .source_path = "/fake/multi",
         .selected_options = &.{},
         .deps = &.{},
         .target_name = "exe",

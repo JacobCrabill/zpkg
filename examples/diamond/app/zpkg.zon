@@ -12,6 +12,7 @@
         .libE = .{
             .package = "diamond.libE",
             .require = .{ .version = "=0.1.0.0" },
+            .source_path = "../libE",
         },
     },
 

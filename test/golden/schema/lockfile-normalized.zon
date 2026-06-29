@@ -17,6 +17,7 @@
             .domain = .target,
             .version = "0.1.0.0",
             .source_hash = "root-hash",
+            .source_path = "/fake/app",
             .selected_options = .{
                 .shared = true,
             },
@@ -29,6 +30,7 @@
             .domain = .target,
             .version = "0.1.0.0",
             .source_hash = "lib-hash",
+            .source_path = "/fake/lib",
             .selected_options = .{},
             .deps = .{},
         },
