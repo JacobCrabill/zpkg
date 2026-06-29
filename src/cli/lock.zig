@@ -171,7 +171,6 @@ fn writeStderrFmt(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
 }
 
 fn generateLockfile(allocator: std.mem.Allocator, io: std.Io, pkg_root: []const u8, resolved: resolve.ResolvedRoot, resolver: *resolve.Resolver) !model.Lockfile {
-    _ = pkg_root; // Source dirs are now looked up from resolver.source_dirs
     const cloned_id = try resolved.package_id.cloneOwned(allocator);
     errdefer cloned_id.deinitOwned(allocator);
 
@@ -208,7 +207,11 @@ fn generateLockfile(allocator: std.mem.Allocator, io: std.Io, pkg_root: []const 
         const src_hash_str = try allocator.dupe(u8, &hex);
         errdefer allocator.free(src_hash_str);
 
-        const src_path_str = try allocator.dupe(u8, dep_dir_path);
+        // Store source path relative to the lockfile directory (pkg_root) so the
+        // lockfile is portable across machines with different checkout locations.
+        // Both pkg_root and dep_dir_path are absolute; pass "/" as cwd (ignored for
+        // absolute inputs by resolvePosix internally).
+        const src_path_str = try std.fs.path.relativePosix(allocator, "/", pkg_root, dep_dir_path);
         errdefer allocator.free(src_path_str);
 
         var deps = try allocator.alloc(model.LockfileDependency, pkg.deps.len);

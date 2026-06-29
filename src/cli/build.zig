@@ -161,7 +161,7 @@ pub fn runBuild(pkg_root: []const u8, mode: build_fallback.BuildMode, io: std.Io
     const max_jobs = max_jobs_override orelse (std.Thread.getCpuCount() catch 4);
 
     // Execute plan.
-    var executor = build_fallback.BuildExecutor.init(allocator, io, &store, &layout, abs_root, max_jobs);
+    var executor = build_fallback.BuildExecutor.init(allocator, io, &store, &layout, abs_root, abs_root, max_jobs);
     defer executor.deinit();
 
     try executor.execute(plan, lockfile);

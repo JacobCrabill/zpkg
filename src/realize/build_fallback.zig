@@ -392,6 +392,9 @@ pub const BuildExecutor = struct {
     workspace: *realize.WorkspaceLayout,
     /// Root package source directory (absolute path).
     pkg_root: []const u8,
+    /// Directory containing the lockfile (absolute path). Used to resolve relative
+    /// source_path values stored in the lockfile.
+    lockfile_dir: []const u8,
     /// Maximum number of concurrent build jobs (1 = serial).
     max_jobs: usize,
 
@@ -401,6 +404,7 @@ pub const BuildExecutor = struct {
         store: *store_mod.Store,
         workspace: *realize.WorkspaceLayout,
         pkg_root: []const u8,
+        lockfile_dir: []const u8,
         max_jobs: usize,
     ) BuildExecutor {
         return .{
@@ -409,6 +413,7 @@ pub const BuildExecutor = struct {
             .store = store,
             .workspace = workspace,
             .pkg_root = pkg_root,
+            .lockfile_dir = lockfile_dir,
             .max_jobs = if (max_jobs == 0) 1 else max_jobs,
         };
     }
@@ -628,12 +633,14 @@ pub const BuildExecutor = struct {
     ) !void {
         const allocator = self.allocator;
 
-        // Use the lockfile-recorded source path directly.
+        // Resolve source_path from the lockfile: if absolute, use as-is (old lockfile
+        // backward compat); if relative, resolve against lockfile_dir.
         if (instance.source_path.len == 0) {
             try printStderr(self.io, "error: '{s}' has no source_path in lockfile; re-run 'zpkg lock'\n", .{display_key});
             return error.MissingSourcePath;
         }
-        const source_dir = instance.source_path; // borrowed, no allocation needed
+        const source_dir = try resolveLockfilePath(allocator, self.lockfile_dir, instance.source_path);
+        defer allocator.free(source_dir);
 
         // Realized source dir in workspace: deps/<display_key>/
         const realized_dir = try self.workspace.depPkgDir(allocator, display_key);
@@ -840,6 +847,19 @@ pub const BuildExecutor = struct {
         }
     }
 };
+
+/// Resolve a lockfile source_path to an absolute path.
+/// If `path` is already absolute (starts with '/'), return a duplicate.
+/// If `path` is relative, join it with `lockfile_dir`.
+/// Caller owns the returned slice.
+fn resolveLockfilePath(
+    allocator: std.mem.Allocator,
+    lockfile_dir: []const u8,
+    path: []const u8,
+) ![]u8 {
+    if (std.fs.path.isAbsolute(path)) return allocator.dupe(u8, path);
+    return std.fs.path.resolve(allocator, &.{ lockfile_dir, path });
+}
 
 fn printStderr(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
     var buf: [2048]u8 = undefined;
