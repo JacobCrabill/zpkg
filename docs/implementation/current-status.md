@@ -1,6 +1,6 @@
 # Current Implementation Status
 
-_Last updated: 2026-06-29 (Phase 16 complete)_
+_Last updated: 2026-06-29 (Phase 17 complete)_
 
 ## Source of truth
 
@@ -24,8 +24,8 @@ This file should track the **current exact state**, not an idealized plan.
 ## Repository state
 
 - Branch: `main`
-- HEAD: `7817fd5` — `Implement Phase 16: explicit source_path in zpkg.zon and lockfile`
-- Working tree: clean (lockfile regeneration pending commit)
+- HEAD: `7265fa7` — `Implement Phase 17: ZON parser hardening`
+- Working tree: clean
 
 ### Relevant stash entries
 
@@ -53,7 +53,7 @@ This file should track the **current exact state**, not an idealized plan.
 | Phase 14 - Binary adapter integration | Complete | Warm-store path works: noopMake + generated_bin redirect; no .o extraction; dep.artifact() transparent across source and binary paths |
 | Phase 15 - Content-addressed store keys | Complete | Store dirs are 64-char hex digests; toolchain detected at build time; double-free and fallbackHex findings fixed |
 | Phase 16 - Source location model | Complete | explicit source_path in zpkg.zon + lockfile; source_dirs tracked in Resolver; paths normalized via std.fs.path.resolve |
-| Phase 17 - ZON parser hardening | Not started | P2: replace fragile string-scan parsers with zon_util.zig; fix PackageCache OOM panic |
+| Phase 17 - ZON parser hardening | Complete | zon_util AST parsing for all build.zig.zon reads; patchFingerprint parse-and-regenerate; PackageCache OOM fixed |
 | Phase 18 - Parallel builds | Not started | P2: wave-based concurrent dispatch for independent packages in build executor |
 
 ---
