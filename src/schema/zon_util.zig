@@ -166,6 +166,26 @@ pub fn parseNonEmptyStringAlloc(
     return value;
 }
 
+/// Parse an enum literal node (e.g., `.foo`) and return the identifier with a
+/// leading dot as a heap-allocated string: `".foo"`.  Returns
+/// `ExpectedEnumLiteral` for non-enum-literal nodes.  Caller owns the result.
+pub fn parseEnumLiteralAlloc(
+    allocator: std.mem.Allocator,
+    doc: *const Document,
+    node: std.zig.Zoir.Node.Index,
+) ![]u8 {
+    return switch (node.get(doc.zoir)) {
+        .enum_literal => |nts| {
+            const ident = nts.get(doc.zoir);
+            const result = try allocator.alloc(u8, ident.len + 1);
+            result[0] = '.';
+            @memcpy(result[1..], ident);
+            return result;
+        },
+        else => error.ExpectedEnumLiteral,
+    };
+}
+
 pub fn parseBool(doc: *const Document, node: std.zig.Zoir.Node.Index) !bool {
     return parseNodeAlloc(bool, std.heap.page_allocator, doc, node) catch |err| switch (err) {
         error.ParseZon => return error.ExpectedBool,
@@ -176,6 +196,14 @@ pub fn parseBool(doc: *const Document, node: std.zig.Zoir.Node.Index) !bool {
 
 pub fn parseInt(doc: *const Document, node: std.zig.Zoir.Node.Index) !i64 {
     return parseNodeAlloc(i64, std.heap.page_allocator, doc, node) catch |err| switch (err) {
+        error.ParseZon => return error.ExpectedInt,
+        error.OutOfMemory => unreachable,
+        else => |e| return e,
+    };
+}
+
+pub fn parseUint(doc: *const Document, node: std.zig.Zoir.Node.Index) !u64 {
+    return parseNodeAlloc(u64, std.heap.page_allocator, doc, node) catch |err| switch (err) {
         error.ParseZon => return error.ExpectedInt,
         error.OutOfMemory => unreachable,
         else => |e| return e,

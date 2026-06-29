@@ -687,11 +687,40 @@ pub fn extractSuggestedFingerprint(stderr: []const u8) ?u64 {
     return std.fmt.parseInt(u64, stderr[hex_start..hex_end], 16) catch null;
 }
 
-/// Rewrite the `fingerprint` field in `<dir>/build.zig.zon`.
+/// Rewrite the `fingerprint` field in `<dir>/build.zig.zon` by parsing the file
+/// with zon_util, updating the fingerprint, and regenerating the entire file.
+/// This avoids fragile string-search replacement.
 pub fn patchFingerprintInBuildZigZon(allocator: std.mem.Allocator, io: std.Io, dir: []const u8, fp: u64) !void {
-    const file_path = try std.Io.Dir.path.join(allocator, &.{ dir, "build.zig.zon" });
-    defer allocator.free(file_path);
-    try patchFingerprintInFile(allocator, io, file_path, fp);
+    var realizer = realize.SourcePkgRealize.init(allocator, io);
+
+    // Read static fields (name, version, paths, etc.) from the workspace build.zig.zon.
+    var fields = try realizer.readSourceFields(dir);
+    defer fields.deinitOwned(allocator);
+    fields.fingerprint = fp;
+
+    // Collect all path deps from the workspace file. Pass an empty resolved map so
+    // every dep in the file is returned as "extra" (they're all path deps here).
+    var empty_resolved = realize.DepPathMap.init(allocator);
+    defer empty_resolved.deinit();
+    var extra_deps = try realizer.readExtraDepsFromSource(dir, empty_resolved);
+    defer {
+        var it = extra_deps.iterator();
+        while (it.next()) |e| {
+            allocator.free(e.key_ptr.*);
+            allocator.free(e.value_ptr.*);
+        }
+        extra_deps.deinit();
+    }
+
+    // Regenerate the file with the corrected fingerprint.
+    var empty_dep_paths = realize.DepPathMap.init(allocator);
+    defer empty_dep_paths.deinit();
+    const zon_content = try realizer.generateBuildZigZon(dir, empty_dep_paths, extra_deps, fields);
+    defer allocator.free(zon_content);
+
+    const dest_dir = try std.Io.Dir.openDirAbsolute(io, dir, .{});
+    defer dest_dir.close(io);
+    try dest_dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = zon_content });
 }
 
 /// Rewrite the `fingerprint` field in the given `build.zig.zon` file (absolute path).

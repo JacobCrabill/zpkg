@@ -1,4 +1,5 @@
 const std = @import("std");
+const zon_util = @import("../schema/zon_util.zig");
 
 pub const DepPathMap = std.StringHashMap([]const u8);
 
@@ -38,12 +39,7 @@ pub const SourcePkgRealize = struct {
         // Read all static fields from the source build.zig.zon (everything except
         // .dependencies, which we replace with workspace-local paths).
         const source_fields = try self.readSourceFields(source_dir);
-        defer {
-            self.allocator.free(source_fields.name);
-            self.allocator.free(source_fields.version);
-            if (source_fields.minimum_zig_version) |v| self.allocator.free(v);
-            self.allocator.free(source_fields.paths_text);
-        }
+        defer source_fields.deinitOwned(self.allocator);
 
         // Collect extra build-tool deps (e.g. `zpkg-build`) not in the resolved map.
         var extra_deps = try self.readExtraDepsFromSource(source_dir, dep_realized_paths);
@@ -112,43 +108,78 @@ pub const SourcePkgRealize = struct {
         fingerprint: ?u64,
         version: []const u8,
         minimum_zig_version: ?[]const u8,
-        paths_text: []const u8,
+        paths: [][]const u8,
+
+        pub fn deinitOwned(self: SourceFields, allocator: std.mem.Allocator) void {
+            allocator.free(self.name);
+            allocator.free(self.version);
+            if (self.minimum_zig_version) |v| allocator.free(v);
+            for (self.paths) |p| allocator.free(p);
+            allocator.free(self.paths);
+        }
     };
 
     /// Read all static fields from the source build.zig.zon that must be copied
-    /// verbatim into the workspace file.  Caller owns all slice fields.
-    fn readSourceFields(self: *SourcePkgRealize, source_dir: []const u8) !SourceFields {
+    /// verbatim into the workspace file.  Caller owns all slice fields (use
+    /// `SourceFields.deinitOwned` to free).
+    pub fn readSourceFields(self: *SourcePkgRealize, source_dir: []const u8) !SourceFields {
         const src_dir = try std.Io.Dir.openDirAbsolute(self.io, source_dir, .{});
         defer src_dir.close(self.io);
         const content = try src_dir.readFileAlloc(self.io, "build.zig.zon", self.allocator, .limited(64 * 1024));
         defer self.allocator.free(content);
+        const sentinel = try self.allocator.dupeZ(u8, content);
+        defer self.allocator.free(sentinel);
 
-        const name = try extractField(self.allocator, content, ".name = ") orelse
-            return error.MissingName;
+        var doc = try zon_util.parseDocument(self.allocator, sentinel);
+        defer doc.deinit(self.allocator);
+        const root = try zon_util.Object.fromNode(&doc, .root);
+
+        // .name may be an enum literal (.my_pkg) or a quoted string ("my_pkg").
+        const name_node = try root.require("name");
+        const name = zon_util.parseEnumLiteralAlloc(self.allocator, &doc, name_node) catch blk: {
+            // Fall back to string: re-wrap decoded bytes in quotes.
+            const inner = try zon_util.parseNonEmptyStringAlloc(self.allocator, &doc, name_node);
+            defer self.allocator.free(inner);
+            break :blk try std.fmt.allocPrint(self.allocator, "\"{s}\"", .{inner});
+        };
         errdefer self.allocator.free(name);
 
-        const fingerprint: ?u64 = blk: {
-            const fp_text = try extractField(self.allocator, content, ".fingerprint = ") orelse break :blk null;
-            defer self.allocator.free(fp_text);
-            break :blk std.fmt.parseInt(u64, fp_text, 0) catch null;
+        const version_node = try root.require("version");
+        const version = blk: {
+            const inner = try zon_util.parseNonEmptyStringAlloc(self.allocator, &doc, version_node);
+            defer self.allocator.free(inner);
+            break :blk try std.fmt.allocPrint(self.allocator, "\"{s}\"", .{inner});
         };
-
-        const version = try extractField(self.allocator, content, ".version = ") orelse
-            return error.MissingVersion;
         errdefer self.allocator.free(version);
 
-        const minimum_zig_version = try extractField(self.allocator, content, ".minimum_zig_version = ");
+        const minimum_zig_version: ?[]const u8 = if (root.get("minimum_zig_version")) |n| blk: {
+            const inner = try zon_util.parseNonEmptyStringAlloc(self.allocator, &doc, n);
+            defer self.allocator.free(inner);
+            break :blk try std.fmt.allocPrint(self.allocator, "\"{s}\"", .{inner});
+        } else null;
         errdefer if (minimum_zig_version) |v| self.allocator.free(v);
 
-        const paths_text = try extractPathsBlock(self.allocator, content) orelse
-            return error.MissingPaths;
+        const fingerprint: ?u64 = if (root.get("fingerprint")) |n| blk: {
+            break :blk try zon_util.parseUint(&doc, n);
+        } else null;
+
+        const paths_node = try root.require("paths");
+        const paths_arr = try zon_util.Array.fromNode(&doc, paths_node);
+        const paths = try self.allocator.alloc([]const u8, paths_arr.len());
+        errdefer self.allocator.free(paths);
+        var paths_filled: usize = 0;
+        errdefer for (paths[0..paths_filled]) |p| self.allocator.free(p);
+        for (0..paths_arr.len()) |i| {
+            paths[i] = try zon_util.parseNonEmptyStringAlloc(self.allocator, &doc, paths_arr.at(i));
+            paths_filled += 1;
+        }
 
         return .{
             .name = name,
             .fingerprint = fingerprint,
             .version = version,
             .minimum_zig_version = minimum_zig_version,
-            .paths_text = paths_text,
+            .paths = paths,
         };
     }
 
@@ -156,7 +187,7 @@ pub const SourcePkgRealize = struct {
     /// for dependencies NOT already present in `resolved_deps`.  These are build-tool
     /// deps (e.g. `zpkg-build`) that the source build.zig needs but that zpkg doesn't
     /// manage through the lockfile.  Caller owns all keys and values in the returned map.
-    fn readExtraDepsFromSource(
+    pub fn readExtraDepsFromSource(
         self: *SourcePkgRealize,
         source_dir: []const u8,
         resolved_deps: DepPathMap,
@@ -175,47 +206,32 @@ pub const SourcePkgRealize = struct {
         defer src_dir_obj.close(self.io);
         const content = src_dir_obj.readFileAlloc(self.io, "build.zig.zon", self.allocator, .limited(64 * 1024)) catch return result;
         defer self.allocator.free(content);
+        const sentinel = self.allocator.dupeZ(u8, content) catch return result;
+        defer self.allocator.free(sentinel);
 
-        // Scan for `.path = "..."` lines inside the .dependencies block.
-        // We parse line-by-line looking for lines that contain a dep field followed by .path.
-        var lines = std.mem.splitScalar(u8, content, '\n');
-        while (lines.next()) |line| {
-            const trimmed = std.mem.trim(u8, line, " \t\r");
-            // Match lines like:  .name = .{ .path = "..." },
-            //                or: .@"name" = .{ .path = "..." },
-            if (!std.mem.startsWith(u8, trimmed, ".")) continue;
-            if (std.mem.indexOf(u8, trimmed, ".path = ") == null) continue;
+        var doc = zon_util.parseDocument(self.allocator, sentinel) catch return result;
+        defer doc.deinit(self.allocator);
+        const root = zon_util.Object.fromNode(&doc, .root) catch return result;
 
-            // Extract dep name.
-            const dep_name = blk: {
-                if (std.mem.startsWith(u8, trimmed, ".@\"")) {
-                    // Quoted: .@"name" = ...
-                    const name_start = ".@\"".len;
-                    const name_end = std.mem.indexOf(u8, trimmed[name_start..], "\"") orelse continue;
-                    break :blk trimmed[name_start .. name_start + name_end];
-                } else {
-                    // Bare: .name = ...
-                    const name_start = 1; // skip the leading dot
-                    const name_end = std.mem.indexOfAny(u8, trimmed[name_start..], " \t=") orelse continue;
-                    break :blk trimmed[name_start .. name_start + name_end];
-                }
-            };
+        const deps_node = root.get("dependencies") orelse return result;
+        const deps_obj = zon_util.Object.fromNode(&doc, deps_node) catch return result;
 
-            // Skip if this dep is already resolved by zpkg.
+        for (0..deps_obj.fieldCount()) |i| {
+            const dep_name = deps_obj.fieldName(i);
             if (resolved_deps.contains(dep_name)) continue;
 
-            // Extract path value.
-            const path_prefix = ".path = \"";
-            const path_start_idx = std.mem.indexOf(u8, trimmed, path_prefix) orelse continue;
-            const path_val_start = path_start_idx + path_prefix.len;
-            const path_val_end = std.mem.indexOfScalarPos(u8, trimmed, path_val_start, '"') orelse continue;
-            const rel_path = trimmed[path_val_start..path_val_end];
+            const dep_val_obj = zon_util.Object.fromNode(&doc, deps_obj.fieldNode(i)) catch continue;
+            const path_node = dep_val_obj.get("path") orelse continue;
+            const rel_path = zon_util.parseNonEmptyStringAlloc(self.allocator, &doc, path_node) catch continue;
+            defer self.allocator.free(rel_path);
 
-            // Resolve to absolute path (relative to source_dir).
-            const abs_path = try std.Io.Dir.path.join(self.allocator, &.{ source_dir, rel_path });
+            const abs_path = std.fs.path.resolve(self.allocator, &.{ source_dir, rel_path }) catch continue;
             errdefer self.allocator.free(abs_path);
 
-            const key = try self.allocator.dupe(u8, dep_name);
+            const key = self.allocator.dupe(u8, dep_name) catch {
+                self.allocator.free(abs_path);
+                continue;
+            };
             errdefer self.allocator.free(key);
 
             try result.put(key, abs_path);
@@ -276,51 +292,16 @@ pub const SourcePkgRealize = struct {
         }
 
         try w.writeAll("    },\n");
-        try w.print("    .paths = {s},\n", .{fields.paths_text});
+        try w.writeAll("    .paths = .{\n");
+        for (fields.paths) |p| {
+            try w.print("        \"{s}\",\n", .{p});
+        }
+        try w.writeAll("    },\n");
         try w.writeAll("}\n");
 
         return try aw.toOwnedSlice();
     }
 };
-
-/// Extract a single-token field value from a build.zig.zon string.
-/// Returns a heap-allocated copy of the raw token (e.g. `"0.1.0"` or `.diamond_liba`),
-/// or null if the needle is not found.  Caller owns the returned slice.
-fn extractField(allocator: std.mem.Allocator, content: []const u8, needle: []const u8) !?[]const u8 {
-    const start = std.mem.indexOf(u8, content, needle) orelse return null;
-    const val_start = start + needle.len;
-    const val_end = std.mem.indexOfScalarPos(u8, content, val_start, ',') orelse return null;
-    const val = std.mem.trim(u8, content[val_start..val_end], " \t\n\r");
-    return try allocator.dupe(u8, val);
-}
-
-/// Extract the `.paths = .{ ... }` block value from a build.zig.zon string.
-/// Returns the raw inner text including the surrounding `.{` and `}`, e.g.
-/// `.{ "build.zig", "src" }`.  Caller owns the returned slice.
-fn extractPathsBlock(allocator: std.mem.Allocator, content: []const u8) !?[]const u8 {
-    const needle = ".paths = ";
-    const needle_pos = std.mem.indexOf(u8, content, needle) orelse return null;
-    const block_start = needle_pos + needle.len;
-    if (block_start >= content.len or content[block_start] != '.') return null;
-    // Walk forward counting brace depth to find the matching '}'.
-    var depth: usize = 0;
-    var i = block_start;
-    while (i < content.len) : (i += 1) {
-        switch (content[i]) {
-            '{' => depth += 1,
-            '}' => {
-                if (depth == 0) return null;
-                depth -= 1;
-                if (depth == 0) {
-                    i += 1;
-                    break;
-                }
-            },
-            else => {},
-        }
-    }
-    return try allocator.dupe(u8, content[block_start..i]);
-}
 
 /// Returns true if `name` is a valid Zig bare identifier (no quoting needed).
 /// Rejects empty strings, names starting with digits, names containing
@@ -418,7 +399,7 @@ test "generateBuildZigZon produces correct content" {
         .fingerprint = null,
         .version = "\"0.1.0\"",
         .minimum_zig_version = "\"0.16.0\"",
-        .paths_text = ".{ \"build.zig\", \"src\" }",
+        .paths = @constCast(&[_][]const u8{ "build.zig", "src" }),
     };
     const content = try realizer.generateBuildZigZon(
         "/project/.zpkg/work/debug-native/root",
@@ -462,7 +443,7 @@ test "generateBuildZigZon output is deterministic with multiple deps" {
         .fingerprint = null,
         .version = "\"0.0.0\"",
         .minimum_zig_version = null,
-        .paths_text = ".{ \".\" }",
+        .paths = @constCast(&[_][]const u8{"."}),
     };
     var empty1 = DepPathMap.init(allocator);
     defer empty1.deinit();
@@ -516,7 +497,7 @@ test "generateBuildZigZon quotes dep names that are not bare identifiers" {
         .fingerprint = null,
         .version = "\"0.0.0\"",
         .minimum_zig_version = null,
-        .paths_text = ".{ \".\" }",
+        .paths = @constCast(&[_][]const u8{"."}),
     };
     const content = try realizer.generateBuildZigZon(dest, dep_map, empty_extra2, fields2);
     defer allocator.free(content);
@@ -543,4 +524,191 @@ test "isBareIdentifier rejects keywords and non-identifier chars" {
     try std.testing.expect(isBareIdentifier("try") == false);
     try std.testing.expect(isBareIdentifier("error") == false);
     try std.testing.expect(isBareIdentifier("struct") == false);
+}
+
+/// Helper for tests: create a temp dir under /tmp with a unique name, write
+/// build.zig.zon, run the callback, then delete the dir.
+fn withTmpZon(
+    io: std.Io,
+    dir_name: []const u8,
+    zon_content: []const u8,
+) ![]u8 {
+    // Return the absolute path; caller is responsible for cleanup.
+    const tmp_path = try std.fmt.allocPrint(std.testing.allocator, "/tmp/{s}", .{dir_name});
+    std.Io.Dir.createDirAbsolute(io, tmp_path, .default_dir) catch |e| switch (e) {
+        error.PathAlreadyExists => {},
+        else => return e,
+    };
+    const dir_obj = try std.Io.Dir.openDirAbsolute(io, tmp_path, .{});
+    defer dir_obj.close(io);
+    try dir_obj.writeFile(io, .{ .sub_path = "build.zig.zon", .data = zon_content });
+    return tmp_path;
+}
+
+fn cleanupTmpDir(io: std.Io, tmp_path: []const u8) void {
+    const parent = std.Io.Dir.openDirAbsolute(io, "/tmp", .{}) catch return;
+    defer parent.close(io);
+    // sub_path relative to /tmp
+    const base = std.fs.path.basename(tmp_path);
+    parent.deleteTree(io, base) catch {};
+}
+
+test "readSourceFields handles field order: paths before name" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const zon =
+        \\.{
+        \\    .paths = .{ "build.zig", "src" },
+        \\    .fingerprint = 0x0000000000000001,
+        \\    .name = .my_pkg,
+        \\    .version = "0.1.0",
+        \\}
+    ;
+    const tmp_path = try withTmpZon(io, "zpkg_test_rsf_order", zon);
+    defer {
+        cleanupTmpDir(io, tmp_path);
+        allocator.free(tmp_path);
+    }
+
+    var realizer = SourcePkgRealize.init(allocator, io);
+    var fields = try realizer.readSourceFields(tmp_path);
+    defer fields.deinitOwned(allocator);
+
+    try std.testing.expectEqualStrings(".my_pkg", fields.name);
+    try std.testing.expectEqualStrings("\"0.1.0\"", fields.version);
+    try std.testing.expectEqual(@as(?u64, 1), fields.fingerprint);
+    try std.testing.expectEqual(@as(usize, 2), fields.paths.len);
+    try std.testing.expectEqualStrings("build.zig", fields.paths[0]);
+    try std.testing.expectEqualStrings("src", fields.paths[1]);
+}
+
+test "readExtraDepsFromSource skips URL deps" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const zon =
+        \\.{
+        \\    .name = .my_pkg,
+        \\    .version = "0.1.0",
+        \\    .paths = .{"."},
+        \\    .dependencies = .{
+        \\        .url_dep = .{
+        \\            .url = "https://example.com/foo.tar.gz",
+        \\            .hash = "abc123",
+        \\        },
+        \\        .path_dep = .{
+        \\            .path = "../some-lib",
+        \\        },
+        \\    },
+        \\}
+    ;
+    const tmp_path = try withTmpZon(io, "zpkg_test_reds_url", zon);
+    defer {
+        cleanupTmpDir(io, tmp_path);
+        allocator.free(tmp_path);
+    }
+
+    var resolved = DepPathMap.init(allocator);
+    defer resolved.deinit();
+
+    var realizer = SourcePkgRealize.init(allocator, io);
+    var extra = try realizer.readExtraDepsFromSource(tmp_path, resolved);
+    defer {
+        var it = extra.iterator();
+        while (it.next()) |e| {
+            allocator.free(e.key_ptr.*);
+            allocator.free(e.value_ptr.*);
+        }
+        extra.deinit();
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), extra.count());
+    try std.testing.expect(extra.contains("path_dep"));
+    try std.testing.expect(!extra.contains("url_dep"));
+}
+
+test "readExtraDepsFromSource handles multi-line dep entries" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    // The old line-scanner would fail on this multi-line format.
+    const zon =
+        \\.{
+        \\    .name = .my_pkg,
+        \\    .version = "0.1.0",
+        \\    .paths = .{"."},
+        \\    .dependencies = .{
+        \\        .zpkg_build = .{
+        \\            .path =
+        \\                "../zpkg-build",
+        \\        },
+        \\    },
+        \\}
+    ;
+    const tmp_path = try withTmpZon(io, "zpkg_test_reds_multiline", zon);
+    defer {
+        cleanupTmpDir(io, tmp_path);
+        allocator.free(tmp_path);
+    }
+
+    var resolved = DepPathMap.init(allocator);
+    defer resolved.deinit();
+
+    var realizer = SourcePkgRealize.init(allocator, io);
+    var extra = try realizer.readExtraDepsFromSource(tmp_path, resolved);
+    defer {
+        var it = extra.iterator();
+        while (it.next()) |e| {
+            allocator.free(e.key_ptr.*);
+            allocator.free(e.value_ptr.*);
+        }
+        extra.deinit();
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), extra.count());
+    try std.testing.expect(extra.contains("zpkg_build"));
+}
+
+test "readExtraDepsFromSource skips resolved deps" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    const zon =
+        \\.{
+        \\    .name = .my_pkg,
+        \\    .version = "0.1.0",
+        \\    .paths = .{"."},
+        \\    .dependencies = .{
+        \\        .managed_dep = .{ .path = "../managed" },
+        \\        .extra_dep = .{ .path = "../extra" },
+        \\    },
+        \\}
+    ;
+    const tmp_path = try withTmpZon(io, "zpkg_test_reds_resolved", zon);
+    defer {
+        cleanupTmpDir(io, tmp_path);
+        allocator.free(tmp_path);
+    }
+
+    // Mark managed_dep as already resolved.
+    var resolved = DepPathMap.init(allocator);
+    defer resolved.deinit();
+    try resolved.put("managed_dep", "/some/path");
+
+    var realizer = SourcePkgRealize.init(allocator, io);
+    var extra = try realizer.readExtraDepsFromSource(tmp_path, resolved);
+    defer {
+        var it = extra.iterator();
+        while (it.next()) |e| {
+            allocator.free(e.key_ptr.*);
+            allocator.free(e.value_ptr.*);
+        }
+        extra.deinit();
+    }
+
+    // Only extra_dep should appear; managed_dep was in resolved.
+    try std.testing.expectEqual(@as(usize, 1), extra.count());
+    try std.testing.expect(extra.contains("extra_dep"));
+    try std.testing.expect(!extra.contains("managed_dep"));
 }

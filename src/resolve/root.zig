@@ -193,10 +193,12 @@ pub const Resolver = struct {
             }
 
             // Parse the dependency manifest using the explicit source_path.
-            const dep_manifest = try self.parseDependencyManifest(dep, current_source_dir);
+            var dep_manifest = try self.parseDependencyManifest(dep, current_source_dir);
+            errdefer dep_manifest.deinitOwned(self.allocator);
+            errdefer self.allocator.free(cache_key);
 
-            // Cache takes ownership of cache_key.
-            self.package_cache.put(cache_key, dep_manifest);
+            // Cache takes ownership of both cache_key and dep_manifest.
+            try self.package_cache.put(cache_key, dep_manifest);
 
             manifests[i] = dep_manifest;
             i += 1;
@@ -408,8 +410,8 @@ const PackageCache = struct {
         return self.entries.getPtr(key);
     }
 
-    fn put(self: *PackageCache, key: []const u8, value: model.PackageManifest) void {
-        self.entries.put(self.allocator, key, value) catch unreachable;
+    fn put(self: *PackageCache, key: []const u8, value: model.PackageManifest) !void {
+        try self.entries.put(self.allocator, key, value);
     }
 
     fn remove(self: *PackageCache, key: []const u8) void {
