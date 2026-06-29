@@ -1,6 +1,6 @@
 # Current Implementation Status
 
-_Last updated: 2026-06-29 (Phase 17 complete)_
+_Last updated: 2026-06-29 (Phase 18 complete)_
 
 ## Source of truth
 
@@ -24,7 +24,7 @@ This file should track the **current exact state**, not an idealized plan.
 ## Repository state
 
 - Branch: `main`
-- HEAD: `7265fa7` — `Implement Phase 17: ZON parser hardening`
+- HEAD: `a2d36fc` — `Implement Phase 18: wave-based parallel builds`
 - Working tree: clean
 
 ### Relevant stash entries
@@ -54,7 +54,7 @@ This file should track the **current exact state**, not an idealized plan.
 | Phase 15 - Content-addressed store keys | Complete | Store dirs are 64-char hex digests; toolchain detected at build time; double-free and fallbackHex findings fixed |
 | Phase 16 - Source location model | Complete | explicit source_path in zpkg.zon + lockfile; source_dirs tracked in Resolver; paths normalized via std.fs.path.resolve |
 | Phase 17 - ZON parser hardening | Complete | zon_util AST parsing for all build.zig.zon reads; patchFingerprint parse-and-regenerate; PackageCache OOM fixed |
-| Phase 18 - Parallel builds | Not started | P2: wave-based concurrent dispatch for independent packages in build executor |
+| Phase 18 - Parallel builds | Complete | wave dispatch via std.Thread; --jobs N caps concurrency; validation-then-spawn prevents use-after-free on error |
 
 ---
 
