@@ -4,17 +4,22 @@
 *.so
 *.a
 
-**/build/
-**/tmp/
+# Generic build/outpt dirs
+build
+tmp
 
-.ccls-cache/
+# LSP cache
+.ccls-cache
 
-.zig-cache/
-zig-out/
-zig-pkg/
-.zpkg/
+# zig & zpkg cache & output dirs
+.zig-cache
+zig-out
+zig-pkg
 
+# git worktrees
 .worktrees/
 
+# zpkg outputs
+.zpkg
 zpkg.lock.zon
 zpkg.workspace.lock.zon
