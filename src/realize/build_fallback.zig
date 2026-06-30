@@ -978,10 +978,15 @@ pub fn patchFingerprintInBuildZigZon(allocator: std.mem.Allocator, io: std.Io, d
 
 /// Rewrite the `fingerprint` field in the given `build.zig.zon` file (absolute path).
 pub fn patchFingerprintInFile(allocator: std.mem.Allocator, io: std.Io, file_path: []const u8, build_cwd: []const u8, fp: u64) !void {
-    // Zig may report paths relative to build_cwd (e.g. "build.zig.zon") or as
-    // un-normalized absolute paths containing ".." (e.g. ".../root/../deps/X/build.zig.zon").
-    // Always go through resolve so ".." components are folded before dirname splits.
-    const abs_path = try std.fs.path.resolve(allocator, &.{ build_cwd, file_path });
+    // Zig may report paths as relative (e.g. "build.zig.zon") or as absolute paths
+    // containing ".." (e.g. ".../root/../deps/X/build.zig.zon").
+    // std.fs.path.resolve(cwd, abs_path) concatenates rather than resets when the
+    // second argument is absolute in some Zig versions, producing doubled paths.
+    // Normalise the two cases separately so ".." is always folded correctly.
+    const abs_path = if (std.fs.path.isAbsolute(file_path))
+        try std.fs.path.resolve(allocator, &.{file_path})
+    else
+        try std.fs.path.resolve(allocator, &.{ build_cwd, file_path });
     defer allocator.free(abs_path);
 
     const dir_path = std.Io.Dir.path.dirname(abs_path) orelse build_cwd;
