@@ -777,7 +777,7 @@ pub const BuildExecutor = struct {
                 if (extractSuggestedFingerprint(result.stderr)) |fp| {
                     if (try extractFingerprintFilePath(allocator, result.stderr)) |fpath| {
                         defer allocator.free(fpath);
-                        try patchFingerprintInFile(allocator, self.io, fpath, fp);
+                        try patchFingerprintInFile(allocator, self.io, fpath, realized_dir, fp);
                         // Retry on next pass.
                         continue;
                     }
@@ -977,9 +977,17 @@ pub fn patchFingerprintInBuildZigZon(allocator: std.mem.Allocator, io: std.Io, d
 }
 
 /// Rewrite the `fingerprint` field in the given `build.zig.zon` file (absolute path).
-pub fn patchFingerprintInFile(allocator: std.mem.Allocator, io: std.Io, file_path: []const u8, fp: u64) !void {
-    const dir_path = std.Io.Dir.path.dirname(file_path) orelse ".";
-    const base_name = std.Io.Dir.path.basename(file_path);
+pub fn patchFingerprintInFile(allocator: std.mem.Allocator, io: std.Io, file_path: []const u8, build_cwd: []const u8, fp: u64) !void {
+    // Zig reports paths relative to the build cwd when running with an explicit cwd.
+    // Resolve to absolute before extracting dir/base components.
+    const abs_path = if (std.fs.path.isAbsolute(file_path))
+        file_path
+    else
+        try std.fs.path.resolve(allocator, &.{ build_cwd, file_path });
+    defer if (!std.fs.path.isAbsolute(file_path)) allocator.free(abs_path);
+
+    const dir_path = std.Io.Dir.path.dirname(abs_path) orelse build_cwd;
+    const base_name = std.Io.Dir.path.basename(abs_path);
 
     const dir_obj = try std.Io.Dir.openDirAbsolute(io, dir_path, .{});
     defer dir_obj.close(io);

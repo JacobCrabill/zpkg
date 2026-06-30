@@ -269,7 +269,7 @@ fn buildRoot(
             if (build_fallback.extractSuggestedFingerprint(result.stderr)) |fp| {
                 if (try build_fallback.extractFingerprintFilePath(allocator, result.stderr)) |fpath| {
                     defer allocator.free(fpath);
-                    try build_fallback.patchFingerprintInFile(allocator, io, fpath, fp);
+                    try build_fallback.patchFingerprintInFile(allocator, io, fpath, root_dir, fp);
                     continue;
                 }
                 // No file path; patch root dir's build.zig.zon.
