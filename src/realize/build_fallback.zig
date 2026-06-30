@@ -285,7 +285,7 @@ fn dfsVisit(
         .domain = instance.key.domain,
         .source_hash = instance.source_hash,
         .selected_options = instance.selected_options,
-        .optimize = .Debug,   // MVP: single debug-native profile
+        .optimize = .Debug, // MVP: single debug-native profile
         .linkage = .static,
         .toolchain_fingerprint = toolchain_fp,
         .dependencies = deps_for_hash,
@@ -523,20 +523,16 @@ pub const BuildExecutor = struct {
 
                 if (!std.mem.eql(u8, &actual_hex, inst.source_hash)) {
                     if (self.strict_lockfile) {
-                        try printStderr(self.io,
-                            "error: {s}: source has changed since last 'zpkg update'\n" ++
+                        try printStderr(self.io, "error: {s}: source has changed since last 'zpkg update'\n" ++
                             "       lockfile hash: {s}\n" ++
                             "       actual hash:   {s}\n" ++
-                            "       Run 'zpkg update' to update the lockfile.\n",
-                            .{ key, inst.source_hash, actual_hex });
+                            "       Run 'zpkg update' to update the lockfile.\n", .{ key, inst.source_hash, actual_hex });
                         return error.SourceDrift;
                     } else {
-                        try printStderr(self.io,
-                            "warning: {s}: source has changed since last 'zpkg update'\n" ++
+                        try printStderr(self.io, "warning: {s}: source has changed since last 'zpkg update'\n" ++
                             "         lockfile hash: {s}\n" ++
                             "         actual hash:   {s}\n" ++
-                            "         Forcing rebuild. Run 'zpkg update' to update the lockfile.\n",
-                            .{ key, inst.source_hash, actual_hex });
+                            "         Forcing rebuild. Run 'zpkg update' to update the lockfile.\n", .{ key, inst.source_hash, actual_hex });
                         try drifted.put(key, {});
                     }
                 }
@@ -989,9 +985,16 @@ pub fn patchFingerprintInFile(allocator: std.mem.Allocator, io: std.Io, file_pat
         try std.fs.path.resolve(allocator, &.{ build_cwd, file_path });
     defer allocator.free(abs_path);
 
+    // if (std.fs.path.isAbsolute(file_path)) {
+    //     std.debug.print("fingerprint resolved path: {s} is absolute\n", .{file_path});
+    // } else {
+    //     std.debug.print("fingerprint resolved path: {s} is NOT absolute\n", .{file_path});
+    // }
+
     const dir_path = std.Io.Dir.path.dirname(abs_path) orelse build_cwd;
     const base_name = std.Io.Dir.path.basename(abs_path);
 
+    // std.debug.print("fingerprint resolved path: {s}\n", .{dir_path});
     const dir_obj = try std.Io.Dir.openDirAbsolute(io, dir_path, .{});
     defer dir_obj.close(io);
 
@@ -1048,8 +1051,16 @@ pub fn extractFingerprintFilePath(allocator: std.mem.Allocator, stderr: []const 
                 nl + 1
             else
                 0;
-            // Path = stderr[line_start .. after] (includes "build.zig.zon", excludes ':')
-            return try allocator.dupe(u8, stderr[line_start..after]);
+            // Strip leading control characters (e.g. \r from Zig's progress display,
+            // which writes \r even to pipes in some builds, making the path appear
+            // absolute in the terminal but start with a non-'/' byte).
+            var path_slice = stderr[line_start..after];
+            while (path_slice.len > 0 and path_slice[0] < 0x20) path_slice = path_slice[1..];
+            if (path_slice.len == 0) {
+                search_pos = after;
+                continue;
+            }
+            return try allocator.dupe(u8, path_slice);
         }
         search_pos = after;
     }
