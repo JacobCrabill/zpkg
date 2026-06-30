@@ -248,13 +248,15 @@ fn buildRoot(
     try stdout.print("[build] {s} (root)\n", .{manifest.package.id.asText()});
     try stdout.flush();
 
+    // Cap dir for the root build: use root_dir itself (it already exists and is
+    // unique per workspace profile).
+    const cap_dir = try std.Io.Dir.openDirAbsolute(io, root_dir, .{});
+    defer cap_dir.close(io);
+
     const root_ok = root_blk: {
         var pass: usize = 0;
         while (pass < 20) : (pass += 1) {
-            const result = try std.process.run(allocator, io, .{
-                .argv = argv,
-                .cwd = .{ .path = root_dir },
-            });
+            const result = try build_fallback.runCapture(allocator, io, argv, root_dir, cap_dir);
             defer {
                 allocator.free(result.stdout);
                 allocator.free(result.stderr);
@@ -272,33 +274,30 @@ fn buildRoot(
                     try build_fallback.patchFingerprintInFile(allocator, io, fpath, root_dir, fp);
                     continue;
                 }
-                // No file path; patch root dir's build.zig.zon.
+                // No file path; patch root dir's build.zig.zon and retry.
                 try build_fallback.patchFingerprintInBuildZigZon(allocator, io, root_dir, fp);
-                // Final pass with inherited stdio for real build output.
-                var child2 = try std.process.spawn(io, .{
-                    .argv = argv,
-                    .cwd = .{ .path = root_dir },
-                    .stdin = .inherit,
-                    .stdout = .inherit,
-                    .stderr = .inherit,
-                });
-                const term2 = try child2.wait(io);
-                switch (term2) {
+                const r2 = try build_fallback.runCapture(allocator, io, argv, root_dir, cap_dir);
+                defer {
+                    allocator.free(r2.stdout);
+                    allocator.free(r2.stderr);
+                }
+                switch (r2.term) {
                     .exited => |code| {
                         if (code != 0) {
+                            try writeStderrFmt(io, "{s}", .{r2.stderr});
                             try writeStderrFmt(io, "error: build failed for root package (exit code {d})\n", .{code});
                             break :root_blk false;
                         }
                     },
                     else => {
+                        try writeStderrFmt(io, "{s}", .{r2.stderr});
                         try writeStderrFmt(io, "error: build process for root package terminated abnormally\n", .{});
                         break :root_blk false;
                     },
                 }
                 break :root_blk true;
             } else {
-                // Real build failure; forward captured output.
-                _ = result.stdout; // already shown via child2 in prior pass if applicable
+                // Real build failure; forward captured stderr to user.
                 try writeStderrFmt(io, "{s}", .{result.stderr});
                 switch (result.term) {
                     .exited => |code| try writeStderrFmt(io, "error: build failed for root package (exit code {d})\n", .{code}),

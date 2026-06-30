@@ -749,16 +749,18 @@ pub const BuildExecutor = struct {
             },
         };
 
+        // Open staging_dir as a Dir so runCapture can create per-pass temp files in it.
+        const cap_dir = try std.Io.Dir.openDirAbsolute(self.io, staging_dir, .{});
+        defer cap_dir.close(self.io);
+
         // Run `zig build install --prefix <staging_dir>` inside realized_dir.
-        // Multi-pass: patch fingerprint mismatches in any file that Zig reports
-        // (including binary adapter deps), then retry until success or real failure.
+        // Multi-pass: patch fingerprint mismatches then retry until success or failure.
         const build_ok = build_blk: {
             var pass: usize = 0;
             while (pass < 20) : (pass += 1) {
-                const result = try std.process.run(allocator, self.io, .{
-                    .argv = &.{ "zig", "build", "install", "--prefix", staging_dir },
-                    .cwd = .{ .path = realized_dir },
-                });
+                const result = try runCapture(allocator, self.io,
+                    &.{ "zig", "build", "install", "--prefix", staging_dir },
+                    realized_dir, cap_dir);
                 defer {
                     allocator.free(result.stdout);
                     allocator.free(result.stderr);
@@ -774,35 +776,35 @@ pub const BuildExecutor = struct {
                     if (try extractFingerprintFilePath(allocator, result.stderr)) |fpath| {
                         defer allocator.free(fpath);
                         try patchFingerprintInFile(allocator, self.io, fpath, realized_dir, fp);
-                        // Retry on next pass.
                         continue;
                     }
-                    // No file path in error; fall back to patching the realized dir.
+                    // No file path; patch the realized dir's own build.zig.zon.
                     try patchFingerprintInBuildZigZon(allocator, self.io, realized_dir, fp);
-                    // One more pass with inherited stdio for real build output.
-                    var child2 = try std.process.spawn(self.io, .{
-                        .argv = &.{ "zig", "build", "install", "--prefix", staging_dir },
-                        .cwd = .{ .path = realized_dir },
-                        .stdin = .inherit,
-                        .stdout = .inherit,
-                        .stderr = .inherit,
-                    });
-                    const term2 = try child2.wait(self.io);
-                    switch (term2) {
+                    // Retry once more — captured so output stays clean.
+                    const r2 = try runCapture(allocator, self.io,
+                        &.{ "zig", "build", "install", "--prefix", staging_dir },
+                        realized_dir, cap_dir);
+                    defer {
+                        allocator.free(r2.stdout);
+                        allocator.free(r2.stderr);
+                    }
+                    switch (r2.term) {
                         .exited => |code| {
                             if (code != 0) {
+                                try printRaw(self.io, r2.stderr);
                                 try printStderr(self.io, "error: build failed for '{s}' (exit code {d})\n", .{ display_key, code });
                                 break :build_blk false;
                             }
                         },
                         else => {
+                            try printRaw(self.io, r2.stderr);
                             try printStderr(self.io, "error: build process for '{s}' terminated abnormally\n", .{display_key});
                             break :build_blk false;
                         },
                     }
                     break :build_blk true;
                 } else {
-                    // Real build failure; forward captured stderr.
+                    // Real build failure; forward captured stderr to user.
                     try printRaw(self.io, result.stderr);
                     switch (result.term) {
                         .exited => |code| try printStderr(self.io, "error: build failed for '{s}' (exit code {d})\n", .{ display_key, code }),
@@ -811,7 +813,6 @@ pub const BuildExecutor = struct {
                     break :build_blk false;
                 }
             }
-            // Exhausted retries.
             try printStderr(self.io, "error: too many fingerprint correction passes for '{s}'\n", .{display_key});
             break :build_blk false;
         };
@@ -870,22 +871,23 @@ pub const BuildExecutor = struct {
 
         // When running in test mode, execute `zig build test --prefix <staging_dir>` as well.
         if (mode == .run_tests) {
-            var test_child = try std.process.spawn(self.io, .{
-                .argv = &.{ "zig", "build", "test", "--prefix", staging_dir },
-                .cwd = .{ .path = realized_dir },
-                .stdin = .inherit,
-                .stdout = .inherit,
-                .stderr = .inherit,
-            });
-            const test_term = try test_child.wait(self.io);
-            switch (test_term) {
+            const test_result = try runCapture(allocator, self.io,
+                &.{ "zig", "build", "test", "--prefix", staging_dir },
+                realized_dir, cap_dir);
+            defer {
+                allocator.free(test_result.stdout);
+                allocator.free(test_result.stderr);
+            }
+            switch (test_result.term) {
                 .exited => |code| {
                     if (code != 0) {
+                        try printRaw(self.io, test_result.stderr);
                         try printStderr(self.io, "error: tests failed for '{s}' (exit code {d})\n", .{ display_key, code });
                         return error.TestsFailed;
                     }
                 },
                 else => {
+                    try printRaw(self.io, test_result.stderr);
                     try printStderr(self.io, "error: test process for '{s}' terminated abnormally\n", .{display_key});
                     return error.TestsFailed;
                 },
@@ -921,6 +923,55 @@ fn printRaw(io: std.Io, text: []const u8) !void {
     const w = &f.interface;
     try w.writeAll(text);
     try w.flush();
+}
+
+/// Monotonic counter for unique capture-file names; shared across threads.
+var capture_seq = std.atomic.Value(u32).init(0);
+
+/// Like std.process.run but redirects stdout/stderr to regular files in
+/// `cap_dir` instead of anonymous pipes.  Regular files have no buffer-size
+/// limit and avoid progress-display artifacts (\r etc.) that some Zig builds
+/// emit even to non-TTY pipe fds.  Each call gets a unique file pair named by
+/// an atomic counter so concurrent threads never collide.
+///
+/// Caller owns result.stdout and result.stderr; files are deleted before return.
+pub fn runCapture(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    argv: []const []const u8,
+    cwd: []const u8,
+    cap_dir: std.Io.Dir,
+) !std.process.RunResult {
+    const seq = capture_seq.fetchAdd(1, .monotonic);
+
+    var out_name_buf: [32]u8 = undefined;
+    var err_name_buf: [32]u8 = undefined;
+    const out_name = std.fmt.bufPrint(&out_name_buf, "cap-{d}-out", .{seq}) catch unreachable;
+    const err_name = std.fmt.bufPrint(&err_name_buf, "cap-{d}-err", .{seq}) catch unreachable;
+
+    // Create with .read = true so the same handle can be used for read-back,
+    // and .truncate = true (default) so stale content is erased on retry.
+    const out_file = try cap_dir.createFile(io, out_name, .{ .read = true });
+    defer cap_dir.deleteFile(io, out_name) catch {};
+
+    const err_file = try cap_dir.createFile(io, err_name, .{ .read = true });
+    defer cap_dir.deleteFile(io, err_name) catch {};
+
+    var child = try std.process.spawn(io, .{
+        .argv = argv,
+        .cwd = .{ .path = cwd },
+        .stdin = .ignore,
+        .stdout = .{ .file = out_file },
+        .stderr = .{ .file = err_file },
+    });
+    const term = try child.wait(io);
+
+    // Read back the captured content.  The deferred deletes run after this.
+    const stdout_bytes = try cap_dir.readFileAlloc(io, out_name, allocator, .unlimited);
+    errdefer allocator.free(stdout_bytes);
+    const stderr_bytes = try cap_dir.readFileAlloc(io, err_name, allocator, .unlimited);
+
+    return .{ .term = term, .stdout = stdout_bytes, .stderr = stderr_bytes };
 }
 
 /// Scan zig build stderr for the fingerprint suggestion produced by lines like:
@@ -985,6 +1036,8 @@ pub fn patchFingerprintInFile(allocator: std.mem.Allocator, io: std.Io, file_pat
         try std.fs.path.resolve(allocator, &.{ build_cwd, file_path });
     defer allocator.free(abs_path);
 
+    // TODO: This is still an issue when using `zig build run` vs `zig-out/bin/zpkg`
+    // TODO: I have no idea why stderr is getting anywhere near this, but :shrug:
     // if (std.fs.path.isAbsolute(file_path)) {
     //     std.debug.print("fingerprint resolved path: {s} is absolute\n", .{file_path});
     // } else {
