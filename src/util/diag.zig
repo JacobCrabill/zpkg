@@ -10,7 +10,10 @@ pub fn resolveAbsPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     const rc = std.os.linux.getcwd(&cwd_buf, cwd_buf.len);
     if (std.os.linux.errno(rc) != .SUCCESS) return error.GetCwdFailed;
     const cwd = std.mem.sliceTo(&cwd_buf, 0);
-    return std.Io.Dir.path.join(allocator, &.{ cwd, path });
+    // Use resolve (not join) so that ".", "..", "../../foo" etc. are normalized.
+    // join(cwd, ".") would produce "{cwd}/." — the dot is kept as a literal
+    // component and throws off relative-path calculations downstream.
+    return std.fs.path.resolve(allocator, &.{ cwd, path });
 }
 
 pub fn writeError(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
