@@ -7,5 +7,5 @@
         .@"zpkg-build" = .{ .path = "../../../pkg/zpkg-build" },
         .libE = .{ .path = "../libE" },
     },
-    .paths = .{ "build.zig", "build.zig.zon", "zpkg.zon", "src" },
+    .paths = .{ "build.zig", "zpkg.zon", "src" },
 }
