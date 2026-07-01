@@ -42,10 +42,16 @@
 #                                 regression guard for the two bugs fixed when
 #                                 the realize command was unified with build
 #                                 (wrong store key + always-empty root deps).
+#   8. Build profile axis         `--release` is a *distinct* store slot: a cold
+#                                 build (not Debug hits), correct app output,
+#                                 cached on its own second run, in a separate
+#                                 releasefast-native workspace, and it leaves the
+#                                 Debug slot's store hits intact. Confirms the
+#                                 profile is folded into the content-addressed key.
 #
 # NOT COVERED (intentionally out of scope for this test):
-#   - Non-native / cross-compilation targets; only the debug-native profile.
-#   - Release/optimize modes (zpkg currently hardcodes Debug).
+#   - Cross-compilation targets (--target): only native profiles are built here;
+#     a cross case needs a target-capable toolchain and is gated out for CI.
 #   - Non-Zig backends (all diamond packages use the .zig backend).
 #   - Build options and conditional dependencies (the diamond has none).
 #   - Source-drift detection and --strict-lockfile behavior.
@@ -176,6 +182,27 @@ assert_symlink "$dep_dir/lib" "adapter lib/ symlinks into the store"
 root_zon="$APP/.zpkg/work/debug-native/root/build.zig.zon"
 root_deps="$(awk '/\.dependencies = \.\{/,/^    \},/' "$root_zon")"
 assert_contains "$root_deps" "libE" "root dep map is non-empty (references libE)"
+echo
+
+# --- 8. Build profile axis: --release is a distinct store slot ----------------
+# The Debug store is already populated (steps 2/4). A --release build must be a
+# fresh build (different keys), still correct, cached on its own, and must not
+# disturb the Debug slot.
+echo "${BOLD}[8] zpkg build --release (distinct profile)${RESET}"
+rel1_out="$("$ZPKG_BIN" build "$APP" --release 2>&1)"
+assert_contains "$rel1_out" "5 instances (0 store hits, 5 to build)" \
+    "--release is a cold build (Debug artifacts don't collide)"
+assert_contains "$rel1_out" "Profile: releasefast-native" "reports the releasefast-native profile"
+assert_file "$APP/.zpkg/work/releasefast-native/root/build.zig.zon" "separate releasefast-native workspace exists"
+rel_app_out="$("$APP/zig-out/bin/app" 2>&1)"
+assert_eq "$rel_app_out" "e_transform(3, 4, 8) = 24" "release app output correct"
+
+rel2_out="$("$ZPKG_BIN" build "$APP" --release 2>&1)"
+assert_contains "$rel2_out" "5 instances (5 store hits, 0 to build)" "second --release is all store hits"
+
+dbg_out="$("$ZPKG_BIN" build "$APP" 2>&1)"
+assert_contains "$dbg_out" "5 instances (5 store hits, 0 to build)" \
+    "Debug slot still intact after building --release"
 echo
 
 # --- Summary ------------------------------------------------------------------

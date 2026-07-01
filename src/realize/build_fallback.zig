@@ -3,6 +3,7 @@ const model = @import("../model/root.zig");
 const store_mod = @import("../store/store.zig");
 const realize = @import("root.zig");
 const realizer_mod = @import("realizer.zig");
+const profile_mod = @import("profile.zig");
 const manifest_mod = @import("../store/manifest.zig");
 const instance_key_mod = @import("../hash/instance_key.zig");
 const toolchain_fingerprint_mod = @import("../hash/toolchain_fingerprint.zig");
@@ -10,6 +11,19 @@ const source_hash_mod = @import("../hash/source_hash.zig");
 const diag = @import("../util/diag.zig");
 
 pub const BuildMode = enum { build, build_with_tests, run_tests };
+
+/// The build-configuration inputs to the content-addressed store key that are not
+/// part of a package's source identity: optimize mode, linkage, and the toolchain
+/// fingerprint (which carries the target triple). Derived from the active Profile.
+pub const KeyConfig = struct {
+    optimize: std.builtin.OptimizeMode,
+    linkage: model.GraphLinkage,
+    toolchain_fp: model.ToolchainFingerprint,
+
+    pub fn fromProfile(p: profile_mod.Profile, toolchain_fp: model.ToolchainFingerprint) KeyConfig {
+        return .{ .optimize = p.optimize, .linkage = p.linkage, .toolchain_fp = toolchain_fp };
+    }
+};
 
 pub const BuildPlan = struct {
     allocator: std.mem.Allocator,
@@ -58,13 +72,14 @@ pub const BuildPlan = struct {
 
 /// Plan which instances need building given a lockfile and store state.
 /// Returns instances in dependency-first topological order, grouped into waves.
-/// `toolchain_fp` is used to derive content-addressed store keys.
+/// `key_config` (optimize/linkage/toolchain) is folded into the content-addressed
+/// store keys, so distinct build profiles map to distinct store slots.
 pub fn planBuild(
     allocator: std.mem.Allocator,
     lockfile: model.Lockfile,
     store: *store_mod.Store,
     mode: BuildMode,
-    toolchain_fp: model.ToolchainFingerprint,
+    key_config: KeyConfig,
 ) !BuildPlan {
     var order: std.ArrayList([]u8) = .empty;
     errdefer {
@@ -129,7 +144,7 @@ pub fn planBuild(
             &store_misses,
             &instance_keys,
             store,
-            toolchain_fp,
+            key_config,
         );
     }
 
@@ -193,7 +208,7 @@ fn dfsVisit(
     store_misses: *std.StringHashMap(void),
     instance_keys: *std.StringHashMap([]const u8),
     store: *store_mod.Store,
-    toolchain_fp: model.ToolchainFingerprint,
+    key_config: KeyConfig,
 ) !usize {
     const key_text = try std.fmt.allocPrint(allocator, "{s}#{s}", .{
         instance.key.package_id.asText(),
@@ -238,7 +253,7 @@ fn dfsVisit(
                 store_misses,
                 instance_keys,
                 store,
-                toolchain_fp,
+                key_config,
             );
             node_level = @max(node_level, dep_level + 1);
         }
@@ -287,11 +302,11 @@ fn dfsVisit(
         .domain = instance.key.domain,
         .source_hash = instance.source_hash,
         .selected_options = instance.selected_options,
-        .optimize = .Debug, // MVP: single debug-native profile
-        .linkage = .static,
-        .toolchain_fingerprint = toolchain_fp,
+        .optimize = key_config.optimize,
+        .linkage = key_config.linkage,
+        .toolchain_fingerprint = key_config.toolchain_fp,
         .dependencies = deps_for_hash,
-    }) catch fallbackHex(key_text, toolchain_fp);
+    }) catch fallbackHex(key_text, key_config.toolchain_fp);
 
     // Store mapping: display_key → hex_digest (both owned by instance_keys).
     const ik_key = try allocator.dupe(u8, key_text);
@@ -402,6 +417,8 @@ pub const BuildExecutor = struct {
     max_jobs: usize,
     /// When true, source drift is a hard error instead of a warning+rebuild.
     strict_lockfile: bool,
+    /// Active build profile; supplies `-Doptimize`/`-Dtarget` flags for `zig build`.
+    profile: profile_mod.Profile,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -412,6 +429,7 @@ pub const BuildExecutor = struct {
         lockfile_dir: []const u8,
         max_jobs: usize,
         strict_lockfile: bool,
+        profile: profile_mod.Profile,
     ) BuildExecutor {
         return .{
             .allocator = allocator,
@@ -422,6 +440,7 @@ pub const BuildExecutor = struct {
             .lockfile_dir = lockfile_dir,
             .max_jobs = if (max_jobs == 0) 1 else max_jobs,
             .strict_lockfile = strict_lockfile,
+            .profile = profile,
         };
     }
 
@@ -682,11 +701,18 @@ pub const BuildExecutor = struct {
         const cap_dir = try std.Io.Dir.openDirAbsolute(self.io, staging_dir, .{});
         defer cap_dir.close(self.io);
 
+        // Profile flags (-Doptimize / -Dtarget) applied to every `zig build` here.
+        const build_flags = try profileBuildFlags(allocator, self.profile);
+        defer freeBuildFlags(allocator, build_flags);
+
         // Run `zig build install --prefix <staging_dir>` inside realized_dir.
         {
-            const result = try runCapture(allocator, self.io,
-                &.{ "zig", "build", "install", "--prefix", staging_dir },
-                realized_dir, cap_dir);
+            var install_argv: std.ArrayList([]const u8) = .empty;
+            defer install_argv.deinit(allocator);
+            try install_argv.appendSlice(allocator, &.{ "zig", "build", "install", "--prefix", staging_dir });
+            try install_argv.appendSlice(allocator, build_flags);
+
+            const result = try runCapture(allocator, self.io, install_argv.items, realized_dir, cap_dir);
             defer {
                 allocator.free(result.stdout);
                 allocator.free(result.stderr);
@@ -759,9 +785,12 @@ pub const BuildExecutor = struct {
 
         // When running in test mode, execute `zig build test --prefix <staging_dir>` as well.
         if (mode == .run_tests) {
-            const test_result = try runCapture(allocator, self.io,
-                &.{ "zig", "build", "test", "--prefix", staging_dir },
-                realized_dir, cap_dir);
+            var test_argv: std.ArrayList([]const u8) = .empty;
+            defer test_argv.deinit(allocator);
+            try test_argv.appendSlice(allocator, &.{ "zig", "build", "test", "--prefix", staging_dir });
+            try test_argv.appendSlice(allocator, build_flags);
+
+            const test_result = try runCapture(allocator, self.io, test_argv.items, realized_dir, cap_dir);
             defer {
                 allocator.free(test_result.stdout);
                 allocator.free(test_result.stderr);
@@ -789,6 +818,28 @@ const resolveLockfilePath = realizer_mod.resolveLockfilePath;
 
 const printStderr = diag.writeStderrFmt;
 const printRaw = diag.writeStderr;
+
+/// Build the `zig build` flags for a profile: always `-Doptimize=<Mode>`, plus
+/// `-Dtarget=<triple>` when the profile targets a non-native triple.  Caller owns
+/// the returned slice and each string in it (free strings, then the slice).
+pub fn profileBuildFlags(allocator: std.mem.Allocator, p: profile_mod.Profile) ![]const []const u8 {
+    var list: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (list.items) |s| allocator.free(s);
+        list.deinit(allocator);
+    }
+    try list.append(allocator, try std.fmt.allocPrint(allocator, "-Doptimize={s}", .{@tagName(p.optimize)}));
+    if (p.target) |triple| {
+        try list.append(allocator, try std.fmt.allocPrint(allocator, "-Dtarget={s}", .{triple}));
+    }
+    return list.toOwnedSlice(allocator);
+}
+
+/// Free a slice returned by `profileBuildFlags`.
+pub fn freeBuildFlags(allocator: std.mem.Allocator, flags: []const []const u8) void {
+    for (flags) |s| allocator.free(s);
+    allocator.free(flags);
+}
 
 /// Monotonic counter for unique capture-file names; shared across threads.
 var capture_seq = std.atomic.Value(u32).init(0);
@@ -918,7 +969,11 @@ test "planBuild topological order: leaves before parents" {
         .cxx_abi_mode = "unknown",
     };
 
-    var plan = try planBuild(allocator, lockfile, &store, .build, sample_fp);
+    var plan = try planBuild(allocator, lockfile, &store, .build, .{
+        .optimize = .Debug,
+        .linkage = .static,
+        .toolchain_fp = sample_fp,
+    });
     defer plan.deinit();
 
     // The plan should have both instances.

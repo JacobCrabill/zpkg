@@ -103,10 +103,11 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     // 8. Detect the toolchain fingerprint and plan the build so we can derive the
     //    content-addressed store keys.  These must match the keys `zpkg build`
     //    writes under, otherwise every instance would miss the store.
-    const toolchain_fp = try toolchain_fingerprint_mod.detect(allocator, io);
+    const toolchain_fp = try toolchain_fingerprint_mod.detect(allocator, io, profile.target);
     defer toolchain_fingerprint_mod.deinitOwned(allocator, toolchain_fp);
 
-    var plan = try realize.planBuild(allocator, lockfile, &store, .build, toolchain_fp);
+    const key_config = realize.build_fallback.KeyConfig.fromProfile(profile, toolchain_fp);
+    var plan = try realize.planBuild(allocator, lockfile, &store, .build, key_config);
     defer plan.deinit();
 
     // 9. Realize each instance: a store hit becomes a binary adapter; a miss is

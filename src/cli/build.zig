@@ -10,20 +10,22 @@ pub const help_text =
     \\zpkg build — Build all instances from the lockfile
     \\
     \\Usage:
-    \\  zpkg build <pkg-root> [--with-tests] [--jobs N] [--strict-lockfile]
+    \\  zpkg build <pkg-root> [options]
     \\
     \\Arguments:
     \\  <pkg-root>        Path to the package directory containing zpkg.lock.zon
     \\
     \\Options:
-    \\  --with-tests      Also build test instances
-    \\  --jobs N          Maximum number of parallel build jobs (default: CPU count; 1 for serial)
-    \\  --strict-lockfile Treat source drift as a hard error (default: warn and rebuild)
+    \\  --with-tests            Also build test instances
+    \\  --jobs N                Maximum number of parallel build jobs (default: CPU count; 1 for serial)
+    \\  --strict-lockfile       Treat source drift as a hard error (default: warn and rebuild)
+    \\  --release[=safe|fast|small]  Optimized build (bare --release = ReleaseFast; default is Debug)
+    \\  --target <triple>       Cross-compile for a Zig target triple (default: native)
     \\
     \\Example:
     \\  zpkg build .
-    \\  zpkg build . --jobs 1
-    \\  zpkg build . --strict-lockfile
+    \\  zpkg build . --release
+    \\  zpkg build . --release=small --target aarch64-linux-gnu
     \\
 ;
 
@@ -32,6 +34,7 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     var pkg_root: ?[]const u8 = null;
     var max_jobs: ?usize = null;
     var strict_lockfile = false;
+    var profile: realize.Profile = .{};
 
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
@@ -57,6 +60,8 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
                 return error.InvalidArgument;
             }
             max_jobs = n;
+        } else if (try tryParseProfileFlag(args, &i, &profile, io)) {
+            // handled (index advanced by the helper if it consumed a value)
         } else if (pkg_root == null) {
             pkg_root = args[i];
         } else {
@@ -66,16 +71,77 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     }
 
     const root = pkg_root orelse {
-        try writeStderr(io, "error: build expects a package root path\nusage: zpkg build <pkg-root> [--with-tests] [--jobs N]\n");
+        try writeStderr(io, "error: build expects a package root path\n" ++
+            "usage: zpkg build <pkg-root> [--with-tests] [--jobs N] [--release[=safe|fast|small]] [--target <triple>]\n");
         return error.InvalidArgument;
     };
 
     const mode: build_fallback.BuildMode = if (with_tests) .build_with_tests else .build;
 
-    try runBuild(root, mode, io, max_jobs, strict_lockfile);
+    try runBuild(root, mode, io, max_jobs, strict_lockfile, profile);
 }
 
-pub fn runBuild(pkg_root: []const u8, mode: build_fallback.BuildMode, io: std.Io, max_jobs_override: ?usize, strict_lockfile: bool) !void {
+/// If `args[i.*]` is a build-profile flag (`--release[=…]`, `--target …`), apply
+/// it to `profile`, advance `i` past any consumed value, and return true. Returns
+/// false if the arg is not a profile flag. Returns an error (after printing a
+/// diagnostic) if it is a profile flag but malformed.
+///
+/// Note: `profile.linkage` is part of the store-key identity but has no CLI flag
+/// yet — there is no standard `zig build` linkage option to make it actually
+/// change the output, so exposing it would only mislabel the store entry. Deferred
+/// until packages expose a linkage option (see docs/profile-target-axis-plan.md).
+///
+/// Shared by `zpkg build` and `zpkg test`.
+pub fn tryParseProfileFlag(
+    args: []const []const u8,
+    i: *usize,
+    profile: *realize.Profile,
+    io: std.Io,
+) !bool {
+    const arg = args[i.*];
+    if (std.mem.eql(u8, arg, "--release")) {
+        profile.optimize = .ReleaseFast;
+    } else if (std.mem.startsWith(u8, arg, "--release=")) {
+        const v = arg["--release=".len..];
+        profile.optimize = if (std.mem.eql(u8, v, "safe"))
+            .ReleaseSafe
+        else if (std.mem.eql(u8, v, "fast"))
+            .ReleaseFast
+        else if (std.mem.eql(u8, v, "small"))
+            .ReleaseSmall
+        else {
+            try writeStderrFmt(io, "error: --release must be safe|fast|small, got '{s}'\n", .{v});
+            return error.InvalidArgument;
+        };
+    } else if (std.mem.eql(u8, arg, "--target")) {
+        i.* += 1;
+        if (i.* >= args.len) {
+            try writeStderr(io, "error: --target requires a triple (e.g. x86_64-linux-gnu)\n");
+            return error.InvalidArgument;
+        }
+        profile.target = args[i.*];
+    } else if (std.mem.startsWith(u8, arg, "--target=")) {
+        profile.target = arg["--target=".len..];
+    } else {
+        return false;
+    }
+    return true;
+}
+
+pub fn runBuild(
+    pkg_root: []const u8,
+    mode: build_fallback.BuildMode,
+    io: std.Io,
+    max_jobs_override: ?usize,
+    strict_lockfile: bool,
+    profile: realize.Profile,
+) !void {
+    // Running foreign-target test binaries needs an emulator/runner; out of scope.
+    if (mode == .run_tests and profile.target != null) {
+        try writeStderr(io, "error: 'zpkg test' cannot run tests for a non-native --target\n");
+        return error.InvalidArgument;
+    }
+
     var gpa: std.heap.DebugAllocator(.{}) = .init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -129,9 +195,7 @@ pub fn runBuild(pkg_root: []const u8, mode: build_fallback.BuildMode, io: std.Io
         return error.LockfileMismatch;
     }
 
-    // Init WorkspaceLayout for the build profile (default: Debug / native / static).
-    // Phase 3 will populate this from CLI flags; for now it is the default.
-    const profile: realize.Profile = .{};
+    // Init WorkspaceLayout for the build profile.
     const profile_slug = try profile.slug(allocator);
     defer allocator.free(profile_slug);
     var layout = try realize.WorkspaceLayout.init(allocator, abs_root, profile_slug);
@@ -142,12 +206,13 @@ pub fn runBuild(pkg_root: []const u8, mode: build_fallback.BuildMode, io: std.Io
     var store = try store_mod.Store.init(allocator, io, abs_root);
     defer store.deinit();
 
-    // Detect toolchain fingerprint once for the entire build invocation.
-    const toolchain_fp = try toolchain_fingerprint_mod.detect(allocator, io);
+    // Detect toolchain fingerprint (with the requested target) for the invocation.
+    const toolchain_fp = try toolchain_fingerprint_mod.detect(allocator, io, profile.target);
     defer toolchain_fingerprint_mod.deinitOwned(allocator, toolchain_fp);
 
-    // Plan the build.
-    var plan = try build_fallback.planBuild(allocator, lockfile, &store, mode, toolchain_fp);
+    // Plan the build. The profile (optimize/linkage/target) is folded into the keys.
+    const key_config = build_fallback.KeyConfig.fromProfile(profile, toolchain_fp);
+    var plan = try build_fallback.planBuild(allocator, lockfile, &store, mode, key_config);
     defer plan.deinit();
 
     // Print plan summary.
@@ -165,13 +230,13 @@ pub fn runBuild(pkg_root: []const u8, mode: build_fallback.BuildMode, io: std.Io
     const max_jobs = max_jobs_override orelse (std.Thread.getCpuCount() catch 4);
 
     // Execute plan.
-    var executor = build_fallback.BuildExecutor.init(allocator, io, &store, &layout, abs_root, abs_root, max_jobs, strict_lockfile);
+    var executor = build_fallback.BuildExecutor.init(allocator, io, &store, &layout, abs_root, abs_root, max_jobs, strict_lockfile, profile);
     defer executor.deinit();
 
     try executor.execute(plan, lockfile);
 
     // Build the root package.
-    try buildRoot(allocator, io, abs_root, manifest, lockfile, &layout, mode);
+    try buildRoot(allocator, io, abs_root, manifest, lockfile, &layout, mode, profile);
 
     try stdout.print(
         "Build complete. Profile: {s}\n",
@@ -188,6 +253,7 @@ fn buildRoot(
     lockfile: schema.Lockfile,
     layout: *realize.WorkspaceLayout,
     mode: build_fallback.BuildMode,
+    profile: realize.Profile,
 ) !void {
     const root_dir = try layout.rootPkgDir(allocator);
     defer allocator.free(root_dir);
@@ -208,11 +274,18 @@ fn buildRoot(
         return error.RealizeFailed;
     };
 
-    // Run `zig build` in the root workspace dir.
-    const argv: []const []const u8 = switch (mode) {
+    // Run `zig build` in the root workspace dir, with the profile flags appended.
+    const base_argv: []const []const u8 = switch (mode) {
         .build, .build_with_tests => &.{ "zig", "build" },
         .run_tests => &.{ "zig", "build", "test" },
     };
+    const build_flags = try build_fallback.profileBuildFlags(allocator, profile);
+    defer build_fallback.freeBuildFlags(allocator, build_flags);
+    var argv_list: std.ArrayList([]const u8) = .empty;
+    defer argv_list.deinit(allocator);
+    try argv_list.appendSlice(allocator, base_argv);
+    try argv_list.appendSlice(allocator, build_flags);
+    const argv = argv_list.items;
 
     var stdout_buf: [4096]u8 = undefined;
     var stdout_file: std.Io.File.Writer = .init(.stdout(), io, &stdout_buf);

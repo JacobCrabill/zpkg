@@ -8,9 +8,15 @@ const zon_util = @import("../schema/zon_util.zig");
 /// Fields that cannot be determined precisely use non-empty sentinel values
 /// so that `validate()` always passes.
 ///
+/// `requested_target` selects the target triple recorded in the fingerprint (and
+/// thus hashed into store keys): null means native (target = host); otherwise the
+/// given Zig triple is used verbatim. NOTE: only the triple varies for now — the
+/// sysroot/libc/ABI fields stay sentinels, so cross-target keys differ by triple
+/// but do not yet reflect a real cross sysroot (see docs/profile-target-axis-plan.md).
+///
 /// All string fields of the returned fingerprint are heap-allocated and
 /// owned by the caller.  Free them with `deinitOwned`.
-pub fn detect(allocator: std.mem.Allocator, io: std.Io) !model.ToolchainFingerprint {
+pub fn detect(allocator: std.mem.Allocator, io: std.Io, requested_target: ?[]const u8) !model.ToolchainFingerprint {
     // 1. zig version
     const zig_version = detectZigVersion(allocator, io) catch |err| blk: {
         warnStderr(io, "warning: failed to detect zig version ({s}); using sentinel\n", .{@errorName(err)});
@@ -25,7 +31,10 @@ pub fn detect(allocator: std.mem.Allocator, io: std.Io) !model.ToolchainFingerpr
     };
     errdefer allocator.free(host_triple);
 
-    const target_triple = try allocator.dupe(u8, host_triple);
+    const target_triple = if (requested_target) |t|
+        try allocator.dupe(u8, t)
+    else
+        try allocator.dupe(u8, host_triple);
     errdefer allocator.free(target_triple);
 
     // 3. C compiler.

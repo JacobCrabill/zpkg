@@ -8,8 +8,11 @@ const model = @import("../model/root.zig");
 ///
 /// See docs/profile-target-axis-plan.md.
 pub const Profile = struct {
-    optimize: std.builtin.OptimizeMode = .Debug,
-    linkage: model.GraphLinkage = .static,
+    pub const Linkage = model.GraphLinkage;
+    pub const Optimize = std.builtin.OptimizeMode;
+
+    optimize: Optimize = .Debug,
+    linkage: Linkage = .static,
     /// null = native (host); otherwise a Zig target triple, e.g. "x86_64-linux-gnu".
     target: ?[]const u8 = null,
 
