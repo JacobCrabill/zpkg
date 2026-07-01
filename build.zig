@@ -43,4 +43,17 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_module_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+
+    // End-to-end integration test: drives the real CLI against the diamond
+    // example (lock → build → run → rebuild → realize). Kept as its own step so
+    // the common `zig build test` loop stays fast and toolchain-light; this step
+    // shells out to `zig build` internally and needs a C toolchain.
+    const integration_cmd = b.addSystemCommand(&.{ "bash", "test/integration/diamond.sh" });
+    integration_cmd.setEnvironmentVariable("ZPKG_BIN", b.getInstallPath(.bin, "zpkg"));
+    integration_cmd.step.dependOn(b.getInstallStep());
+    // Never cached: the script mutates the example working tree.
+    integration_cmd.has_side_effects = true;
+
+    const integration_step = b.step("integration", "Run the diamond end-to-end integration test");
+    integration_step.dependOn(&integration_cmd.step);
 }
