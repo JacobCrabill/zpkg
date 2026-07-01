@@ -2,6 +2,7 @@ const std = @import("std");
 const schema = @import("../schema/root.zig");
 const realize = @import("../realize/root.zig");
 const store_mod = @import("../store/store.zig");
+const toolchain_fingerprint_mod = @import("../hash/toolchain_fingerprint.zig");
 const diag_util = @import("../util/diag.zig");
 
 pub const help_text =
@@ -97,147 +98,69 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     var store = try store_mod.Store.init(allocator, io, pkg_root);
     defer store.deinit();
 
-    // 8. Realize each instance
-    var source_realizer = realize.SourcePkgRealize.init(allocator, io);
-    var binary_adapter = realize.BinaryAdapter.init(allocator, io);
+    // 8. Detect the toolchain fingerprint and plan the build so we can derive the
+    //    content-addressed store keys.  These must match the keys `zpkg build`
+    //    writes under, otherwise every instance would miss the store.
+    const toolchain_fp = try toolchain_fingerprint_mod.detect(allocator, io);
+    defer toolchain_fingerprint_mod.deinitOwned(allocator, toolchain_fp);
 
-    for (lockfile.instances) |instance| {
-        const key_text = try std.fmt.allocPrint(allocator, "{s}#{s}", .{
+    var plan = try realize.planBuild(allocator, lockfile, &store, .build, toolchain_fp);
+    defer plan.deinit();
+
+    // 9. Realize each instance: a store hit becomes a binary adapter; a miss is
+    //    materialized as a source package from its recorded source_path.
+    var r = realize.Realizer.init(allocator, io, &layout, pkg_root);
+
+    for (lockfile.instances) |*instance| {
+        const display_key = try std.fmt.allocPrint(allocator, "{s}#{s}", .{
             instance.key.package_id.asText(),
             instance.key.domain.asText(),
         });
-        defer allocator.free(key_text);
+        defer allocator.free(display_key);
 
-        const dest_dir = try layout.depPkgDir(allocator, key_text);
-        defer allocator.free(dest_dir);
+        const store_key = plan.instance_keys.get(display_key) orelse display_key;
 
-        // Ensure dep dir exists
-        std.Io.Dir.createDirAbsolute(io, dest_dir, .default_dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
-
-        // Build dep_realized_paths for this instance.
-        // dep_map owns both the key (duped from dep.alias) and the value (allocated path).
-        var dep_map = realize.DepPathMap.init(allocator);
-        for (instance.deps) |dep| {
-            const dep_key_text = try std.fmt.allocPrint(allocator, "{s}#{s}", .{
-                dep.instance.package_id.asText(),
-                dep.instance.domain.asText(),
-            });
-            defer allocator.free(dep_key_text);
-            const dep_path = try layout.depPkgDir(allocator, dep_key_text);
-            errdefer allocator.free(dep_path);
-            // Dup dep.alias so the map key doesn't borrow from the lockfile allocation.
-            const alias_key = try allocator.dupe(u8, dep.alias);
-            errdefer allocator.free(alias_key);
-            try dep_map.put(alias_key, dep_path);
-        }
-        defer {
-            var it = dep_map.iterator();
-            while (it.next()) |entry| {
-                allocator.free(entry.key_ptr.*);
-                allocator.free(entry.value_ptr.*);
-            }
-            dep_map.deinit();
-        }
-
-        if (store.hasArtifact(key_text)) {
-            // Binary: expand from store and generate adapter
-            const expanded = store.expandArtifact(key_text) catch |err| {
-                try writeStderrFmt(io, "warning: failed to expand artifact '{s}': {s}\n", .{ key_text, @errorName(err) });
-                continue;
-            };
-            defer allocator.free(expanded);
-
-            const artifact_manifest = store.loadManifest(key_text) catch |err| {
-                try writeStderrFmt(io, "warning: failed to load manifest for '{s}': {s}\n", .{ key_text, @errorName(err) });
-                continue;
-            };
-            defer artifact_manifest.deinit(allocator);
-
-            // Read source fingerprint so the binary adapter carries the same package identity.
-            const source_fp: ?u64 = blk: {
-                if (instance.source_path.len == 0) break :blk null;
-                const src_abs = if (std.fs.path.isAbsolute(instance.source_path))
-                    allocator.dupe(u8, instance.source_path) catch break :blk null
-                else
-                    std.fs.path.resolve(allocator, &.{ pkg_root, instance.source_path }) catch break :blk null;
-                defer allocator.free(src_abs);
-                var sr = realize.SourcePkgRealize.init(allocator, io);
-                const fields = sr.readSourceFields(src_abs) catch break :blk null;
-                defer fields.deinitOwned(allocator);
-                break :blk fields.fingerprint;
-            };
-
-            binary_adapter.generate(dest_dir, expanded, artifact_manifest, dep_map, source_fp) catch |err| {
-                try writeStderrFmt(io, "warning: failed to generate adapter for '{s}': {s}\n", .{ key_text, @errorName(err) });
+        if (store.hasArtifact(store_key)) {
+            r.realizeBinaryAdapter(&store, instance, display_key, store_key) catch |err| {
+                try writeStderrFmt(io, "warning: failed to generate adapter for '{s}': {s}\n", .{ display_key, @errorName(err) });
             };
         } else {
-            // Source: symlink forest from adjacent source directory.
-            // MVP convention: source lives at <pkg_root>/../<last-component-of-package-id>
-            // where the last component is the portion after the final '.'.
-            // Use instance.package_id (the direct field, same as instance.key.package_id)
-            // because it is guaranteed populated by lockfile parsing.
-            const pkg_name = instance.package_id.asText();
-            // Extract last dot-separated component; fall back to full name if no '.' present.
-            const pkg_basename = if (std.mem.lastIndexOfScalar(u8, pkg_name, '.')) |dot_idx|
-                pkg_name[dot_idx + 1 ..]
-            else
-                pkg_name;
-            const source_dir = try std.Io.Dir.path.join(allocator, &.{ pkg_root, "..", pkg_basename });
+            if (instance.source_path.len == 0) {
+                try writeStderrFmt(io, "warning: '{s}' has no source_path in lockfile; skipping\n", .{display_key});
+                continue;
+            }
+            const source_dir = realize.resolveLockfilePath(allocator, pkg_root, instance.source_path) catch |err| {
+                try writeStderrFmt(io, "warning: cannot resolve source for '{s}': {s}\n", .{ display_key, @errorName(err) });
+                continue;
+            };
             defer allocator.free(source_dir);
 
-            source_realizer.realize(source_dir, dest_dir, pkg_name, dep_map) catch |err| {
-                try writeStderrFmt(io, "warning: failed to realize source for '{s}': {s}\n", .{ key_text, @errorName(err) });
+            r.realizeSource(source_dir, display_key, instance) catch |err| {
+                try writeStderrFmt(io, "warning: failed to realize source for '{s}': {s}\n", .{ display_key, @errorName(err) });
             };
         }
     }
 
-    // 9. Realize root package itself as source pkg
+    // 10. Realize the root package itself as a source pkg. Its dep map comes from
+    //     the manifest, since the root is not an entry in lockfile.instances.
     {
         const root_dir = try layout.rootPkgDir(allocator);
         defer allocator.free(root_dir);
 
-        // root_dep_map owns both duped keys (from dep.alias) and allocated value paths.
-        var root_dep_map = realize.DepPathMap.init(allocator);
-        defer {
-            var it = root_dep_map.iterator();
-            while (it.next()) |entry| {
-                allocator.free(entry.key_ptr.*);
-                allocator.free(entry.value_ptr.*);
-            }
-            root_dep_map.deinit();
-        }
+        std.Io.Dir.createDirAbsolute(io, root_dir, .default_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
 
-        // Find root instance in lockfile to get its deps.
-        // Use manifest.package.id for the source realize call below.
-        const root_pkg_name = manifest.package.id.asText();
-        for (lockfile.instances) |instance| {
-            if (instance.key.package_id.eql(lockfile.root.package_id)) {
-                for (instance.deps) |dep| {
-                    const dep_key_text = try std.fmt.allocPrint(allocator, "{s}#{s}", .{
-                        dep.instance.package_id.asText(),
-                        dep.instance.domain.asText(),
-                    });
-                    defer allocator.free(dep_key_text);
-                    const dep_path = try layout.depPkgDir(allocator, dep_key_text);
-                    errdefer allocator.free(dep_path);
-                    // Dup dep.alias so the map key doesn't borrow from the lockfile allocation.
-                    const alias_key = try allocator.dupe(u8, dep.alias);
-                    errdefer allocator.free(alias_key);
-                    try root_dep_map.put(alias_key, dep_path);
-                }
-                break;
-            }
-        }
+        var root_dep_map = try r.buildRootDepMap(manifest.deps, lockfile);
+        defer r.freeDepMap(&root_dep_map);
 
-        source_realizer.realize(pkg_root, root_dir, root_pkg_name, root_dep_map) catch |err| {
+        r.writeSourceRealization(pkg_root, root_dir, manifest.package.id.asText(), root_dep_map) catch |err| {
             try writeStderrFmt(io, "warning: failed to realize root package: {s}\n", .{@errorName(err)});
         };
     }
 
-    // 10. Print success summary
+    // 11. Print success summary
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer_file: std.Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const stdout = &stdout_writer_file.interface;

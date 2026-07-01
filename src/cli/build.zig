@@ -198,39 +198,13 @@ fn buildRoot(
         else => return err,
     };
 
-    // Build dep_map: alias → workspace dep dir, from manifest deps cross-referenced
-    // with lockfile instances.
-    var root_dep_map = realize.DepPathMap.init(allocator);
-    defer {
-        var it = root_dep_map.iterator();
-        while (it.next()) |entry| {
-            allocator.free(entry.key_ptr.*);
-            allocator.free(entry.value_ptr.*);
-        }
-        root_dep_map.deinit();
-    }
+    // Realize the root package into the workspace. Its dep map comes from the
+    // manifest (the root is not an entry in lockfile.instances).
+    var r = realize.Realizer.init(allocator, io, layout, pkg_root);
+    var root_dep_map = try r.buildRootDepMap(manifest.deps, lockfile);
+    defer r.freeDepMap(&root_dep_map);
 
-    for (manifest.deps) |dep| {
-        // Find the lockfile instance for this dep.
-        for (lockfile.instances) |instance| {
-            if (!instance.key.package_id.eql(dep.package)) continue;
-            const dep_key = try std.fmt.allocPrint(allocator, "{s}#{s}", .{
-                instance.key.package_id.asText(),
-                instance.key.domain.asText(),
-            });
-            defer allocator.free(dep_key);
-            const dep_path = try layout.depPkgDir(allocator, dep_key);
-            errdefer allocator.free(dep_path);
-            const alias_key = try allocator.dupe(u8, dep.alias);
-            errdefer allocator.free(alias_key);
-            try root_dep_map.put(alias_key, dep_path);
-            break;
-        }
-    }
-
-    // Realize the root package into the workspace.
-    var source_realizer = realize.SourcePkgRealize.init(allocator, io);
-    source_realizer.realize(pkg_root, root_dir, manifest.package.id.asText(), root_dep_map) catch |err| {
+    r.writeSourceRealization(pkg_root, root_dir, manifest.package.id.asText(), root_dep_map) catch |err| {
         try writeStderrFmt(io, "error: failed to realize root package: {s}\n", .{@errorName(err)});
         return error.RealizeFailed;
     };

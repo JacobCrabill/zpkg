@@ -2,6 +2,7 @@ const std = @import("std");
 const model = @import("../model/root.zig");
 const store_mod = @import("../store/store.zig");
 const realize = @import("root.zig");
+const realizer_mod = @import("realizer.zig");
 const manifest_mod = @import("../store/manifest.zig");
 const instance_key_mod = @import("../hash/instance_key.zig");
 const toolchain_fingerprint_mod = @import("../hash/toolchain_fingerprint.zig");
@@ -436,66 +437,11 @@ pub const BuildExecutor = struct {
         store_key: []const u8,
         lockfile: model.Lockfile,
     ) !void {
-        const allocator = self.allocator;
-
-        // Find the lockfile instance via the human-readable display key.
         const instance_ref = model.lockfile.InstanceRef.parse(display_key) catch return;
         const instance = lockfile.findInstance(instance_ref) orelse return;
 
-        // Create workspace dep dir (named after display key).
-        const dest_dir = try self.workspace.depPkgDir(allocator, display_key);
-        defer allocator.free(dest_dir);
-        std.Io.Dir.createDirAbsolute(self.io, dest_dir, .default_dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
-
-        // Expand artifact using the content-addressed store key.
-        const expanded = try self.store.expandArtifact(store_key);
-        defer allocator.free(expanded);
-
-        // Load artifact manifest using the content-addressed store key.
-        const artifact_manifest = try self.store.loadManifest(store_key);
-        defer artifact_manifest.deinit(allocator);
-
-        // Build dep_map: alias → workspace dep dir for each dep instance.
-        // Workspace dep dirs are keyed by display key.
-        var dep_map = realize.DepPathMap.init(allocator);
-        defer {
-            var it = dep_map.iterator();
-            while (it.next()) |entry| {
-                allocator.free(entry.key_ptr.*);
-                allocator.free(entry.value_ptr.*);
-            }
-            dep_map.deinit();
-        }
-        for (instance.deps) |dep| {
-            const dep_key = try std.fmt.allocPrint(allocator, "{s}#{s}", .{
-                dep.instance.package_id.asText(),
-                dep.instance.domain.asText(),
-            });
-            defer allocator.free(dep_key);
-            const dep_path = try self.workspace.depPkgDir(allocator, dep_key);
-            errdefer allocator.free(dep_path);
-            const alias_key = try allocator.dupe(u8, dep.alias);
-            errdefer allocator.free(alias_key);
-            try dep_map.put(alias_key, dep_path);
-        }
-
-        // Read the source fingerprint so the binary adapter carries the same identity.
-        const source_fp: ?u64 = blk: {
-            if (instance.source_path.len == 0) break :blk null;
-            const src_abs = resolveLockfilePath(allocator, self.lockfile_dir, instance.source_path) catch break :blk null;
-            defer allocator.free(src_abs);
-            var sr = realize.SourcePkgRealize.init(allocator, self.io);
-            const fields = sr.readSourceFields(src_abs) catch break :blk null;
-            defer fields.deinitOwned(allocator);
-            break :blk fields.fingerprint;
-        };
-
-        // Generate binary adapter.
-        var adapter = realize.BinaryAdapter.init(allocator, self.io);
-        try adapter.generate(dest_dir, expanded, artifact_manifest, dep_map, source_fp);
+        var r = realizer_mod.Realizer.init(self.allocator, self.io, self.workspace, self.lockfile_dir);
+        try r.realizeBinaryAdapter(self.store, instance, display_key, store_key);
     }
 
     pub fn execute(
@@ -703,38 +649,10 @@ pub const BuildExecutor = struct {
         const realized_dir = try self.workspace.depPkgDir(allocator, display_key);
         defer allocator.free(realized_dir);
 
-        // Ensure realized dir exists.
-        std.Io.Dir.createDirAbsolute(self.io, realized_dir, .default_dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
-
-        // Build dep_realized_paths for this instance.
-        var dep_map = realize.DepPathMap.init(allocator);
-        defer {
-            var it = dep_map.iterator();
-            while (it.next()) |entry| {
-                allocator.free(entry.key_ptr.*);
-                allocator.free(entry.value_ptr.*);
-            }
-            dep_map.deinit();
-        }
-        for (instance.deps) |dep| {
-            const dep_key = try std.fmt.allocPrint(allocator, "{s}#{s}", .{
-                dep.instance.package_id.asText(),
-                dep.instance.domain.asText(),
-            });
-            defer allocator.free(dep_key);
-            const dep_path = try self.workspace.depPkgDir(allocator, dep_key);
-            errdefer allocator.free(dep_path);
-            const alias_key = try allocator.dupe(u8, dep.alias);
-            errdefer allocator.free(alias_key);
-            try dep_map.put(alias_key, dep_path);
-        }
-
-        // Realize source package into workspace.
-        var source_realizer = realize.SourcePkgRealize.init(allocator, self.io);
-        source_realizer.realize(source_dir, realized_dir, instance.package_id.asText(), dep_map) catch |err| {
+        // Realize source package into workspace (creates the dir, symlinks the source
+        // tree, and rewrites build.zig.zon dependencies to workspace-local paths).
+        var r = realizer_mod.Realizer.init(allocator, self.io, self.workspace, self.lockfile_dir);
+        r.realizeSource(source_dir, display_key, instance) catch |err| {
             try printStderr(self.io, "error: failed to realize source for '{s}': {s}\n", .{ display_key, @errorName(err) });
             return error.RealizeFailed;
         };
@@ -867,18 +785,8 @@ pub const BuildExecutor = struct {
     }
 };
 
-/// Resolve a lockfile source_path to an absolute path.
-/// If `path` is already absolute (starts with '/'), return a duplicate.
-/// If `path` is relative, join it with `lockfile_dir`.
-/// Caller owns the returned slice.
-fn resolveLockfilePath(
-    allocator: std.mem.Allocator,
-    lockfile_dir: []const u8,
-    path: []const u8,
-) ![]u8 {
-    if (std.fs.path.isAbsolute(path)) return allocator.dupe(u8, path);
-    return std.fs.path.resolve(allocator, &.{ lockfile_dir, path });
-}
+/// Resolve a lockfile source_path to an absolute path (see realizer.resolveLockfilePath).
+const resolveLockfilePath = realizer_mod.resolveLockfilePath;
 
 fn printStderr(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
     var buf: [2048]u8 = undefined;
