@@ -73,16 +73,9 @@ pub fn run(mode: Mode, args: []const []const u8, io: std.Io, help_text: []const 
     };
     defer manifest.deinitOwned(allocator);
 
-    // Resolve packages.
-    // TODO(profile-axis): host/target are hardcoded to linux/x86_64; detect the
-    // real host and thread the target through once profiles exist.
-    const environment = conditions.Environment{
-        .domain = .target,
-        .host_os = conditions.Os.linux,
-        .host_arch = conditions.Arch.x86_64,
-        .target_os = conditions.Os.linux,
-        .target_arch = conditions.Arch.x86_64,
-    };
+    // Resolve packages for the native host. Cross-target resolution is deferred
+    // (see docs/profile-target-axis-plan.md); the build profile is a separate axis.
+    const environment = conditions.detectHost();
 
     var resolver = resolve.Resolver.init(allocator, environment.host_os, environment.host_arch, environment.target_os, environment.target_arch, &.{}, pkg_root, io);
     defer resolver.deinit();

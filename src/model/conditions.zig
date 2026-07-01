@@ -19,6 +19,25 @@ pub const Environment = struct {
     target_arch: Arch,
 };
 
+/// Resolution environment for the machine zpkg is running on.
+///
+/// `domain` is `.target` and the target OS/arch mirror the host: this iteration
+/// resolves for the native target only (see docs/profile-target-axis-plan.md).
+/// Cross-target resolution is deferred future work; the build profile
+/// (optimize/target/linkage) is a separate axis handled at build time.
+pub fn detectHost() Environment {
+    const builtin = @import("builtin");
+    const host_os: Os = builtin.os.tag;
+    const host_arch: Arch = builtin.cpu.arch;
+    return .{
+        .domain = .target,
+        .host_os = host_os,
+        .host_arch = host_arch,
+        .target_os = host_os,
+        .target_arch = host_arch,
+    };
+}
+
 pub const OptionMatch = struct {
     name: []const u8,
     value: options.Value,
@@ -207,4 +226,15 @@ test "borrowed condition can be cloned into owned storage and released" {
     try std.testing.expect(borrowed.options[0].value.string.ptr != owned.options[0].value.string.ptr);
 
     owned.deinitOwned(arena);
+}
+
+test "detectHost mirrors the compiled-in host and resolves native" {
+    const builtin = @import("builtin");
+    const env = detectHost();
+    try std.testing.expectEqual(builtin.os.tag, env.host_os);
+    try std.testing.expectEqual(builtin.cpu.arch, env.host_arch);
+    // Native: target mirrors host, domain is target.
+    try std.testing.expectEqual(env.host_os, env.target_os);
+    try std.testing.expectEqual(env.host_arch, env.target_arch);
+    try std.testing.expectEqual(Domain.target, env.domain);
 }
