@@ -129,9 +129,12 @@ pub fn runBuild(pkg_root: []const u8, mode: build_fallback.BuildMode, io: std.Io
         return error.LockfileMismatch;
     }
 
-    // Init WorkspaceLayout.
-    const profile = realize.workspace.defaultProfile();
-    var layout = try realize.WorkspaceLayout.init(allocator, abs_root, profile);
+    // Init WorkspaceLayout for the build profile (default: Debug / native / static).
+    // Phase 3 will populate this from CLI flags; for now it is the default.
+    const profile: realize.Profile = .{};
+    const profile_slug = try profile.slug(allocator);
+    defer allocator.free(profile_slug);
+    var layout = try realize.WorkspaceLayout.init(allocator, abs_root, profile_slug);
     defer layout.deinit();
     try layout.ensureDirs(io);
 
@@ -172,7 +175,7 @@ pub fn runBuild(pkg_root: []const u8, mode: build_fallback.BuildMode, io: std.Io
 
     try stdout.print(
         "Build complete. Profile: {s}\n",
-        .{profile},
+        .{profile_slug},
     );
     try stdout.flush();
 }

@@ -87,8 +87,10 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     }
 
     // 5. Init WorkspaceLayout with default profile
-    const profile = realize.workspace.defaultProfile();
-    var layout = try realize.WorkspaceLayout.init(allocator, pkg_root, profile);
+    const profile: realize.Profile = .{};
+    const profile_slug = try profile.slug(allocator);
+    defer allocator.free(profile_slug);
+    var layout = try realize.WorkspaceLayout.init(allocator, pkg_root, profile_slug);
     defer layout.deinit();
 
     // 6. Ensure dirs exist
@@ -166,7 +168,7 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     const stdout = &stdout_writer_file.interface;
     try stdout.print(
         "Workspace realized at: {s}\n  Profile: {s}\n  Instances: {d}\n",
-        .{ layout.workspace_root, profile, lockfile.instances.len },
+        .{ layout.workspace_root, profile_slug, lockfile.instances.len },
     );
     try stdout.flush();
 }

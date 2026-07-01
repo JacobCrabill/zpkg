@@ -4,10 +4,6 @@ const work_subdir = "work";
 const root_subdir = "root";
 const deps_subdir = "deps";
 
-pub fn defaultProfile() []const u8 {
-    return "debug-native";
-}
-
 pub const WorkspaceLayout = struct {
     allocator: std.mem.Allocator,
     workspace_root: []const u8, // path to .zpkg/work/<profile>/
@@ -92,8 +88,4 @@ test "WorkspaceLayout derives correct paths" {
     const dep = try layout.depPkgDir(allocator, "zpkg.example.hello_lib#target");
     defer allocator.free(dep);
     try std.testing.expectEqualStrings("/project/.zpkg/work/debug-native/deps/zpkg.example.hello_lib#target", dep);
-}
-
-test "defaultProfile returns stable value" {
-    try std.testing.expectEqualStrings("debug-native", defaultProfile());
 }
