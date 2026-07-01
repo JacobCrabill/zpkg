@@ -156,7 +156,21 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
             };
             defer artifact_manifest.deinit(allocator);
 
-            binary_adapter.generate(dest_dir, expanded, artifact_manifest, dep_map) catch |err| {
+            // Read source fingerprint so the binary adapter carries the same package identity.
+            const source_fp: ?u64 = blk: {
+                if (instance.source_path.len == 0) break :blk null;
+                const src_abs = if (std.fs.path.isAbsolute(instance.source_path))
+                    allocator.dupe(u8, instance.source_path) catch break :blk null
+                else
+                    std.fs.path.resolve(allocator, &.{ pkg_root, instance.source_path }) catch break :blk null;
+                defer allocator.free(src_abs);
+                var sr = realize.SourcePkgRealize.init(allocator, io);
+                const fields = sr.readSourceFields(src_abs) catch break :blk null;
+                defer fields.deinitOwned(allocator);
+                break :blk fields.fingerprint;
+            };
+
+            binary_adapter.generate(dest_dir, expanded, artifact_manifest, dep_map, source_fp) catch |err| {
                 try writeStderrFmt(io, "warning: failed to generate adapter for '{s}': {s}\n", .{ key_text, @errorName(err) });
             };
         } else {

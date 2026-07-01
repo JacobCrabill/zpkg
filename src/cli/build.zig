@@ -236,7 +236,6 @@ fn buildRoot(
     };
 
     // Run `zig build` in the root workspace dir.
-    // Multi-pass: patch fingerprint mismatches (including adapter deps) then retry.
     const argv: []const []const u8 = switch (mode) {
         .build, .build_with_tests => &.{ "zig", "build" },
         .run_tests => &.{ "zig", "build", "test" },
@@ -253,63 +252,27 @@ fn buildRoot(
     const cap_dir = try std.Io.Dir.openDirAbsolute(io, root_dir, .{});
     defer cap_dir.close(io);
 
-    const root_ok = root_blk: {
-        var pass: usize = 0;
-        while (pass < 20) : (pass += 1) {
-            const result = try build_fallback.runCapture(allocator, io, argv, root_dir, cap_dir);
-            defer {
-                allocator.free(result.stdout);
-                allocator.free(result.stderr);
-            }
-
-            const ok = switch (result.term) {
-                .exited => |code| code == 0,
-                else => false,
-            };
-            if (ok) break :root_blk true;
-
-            if (build_fallback.extractSuggestedFingerprint(result.stderr)) |fp| {
-                if (try build_fallback.extractFingerprintFilePath(allocator, result.stderr)) |fpath| {
-                    defer allocator.free(fpath);
-                    try build_fallback.patchFingerprintInFile(allocator, io, fpath, root_dir, fp);
-                    continue;
-                }
-                // No file path; patch root dir's build.zig.zon and retry.
-                try build_fallback.patchFingerprintInBuildZigZon(allocator, io, root_dir, fp);
-                const r2 = try build_fallback.runCapture(allocator, io, argv, root_dir, cap_dir);
-                defer {
-                    allocator.free(r2.stdout);
-                    allocator.free(r2.stderr);
-                }
-                switch (r2.term) {
-                    .exited => |code| {
-                        if (code != 0) {
-                            try writeStderrFmt(io, "{s}", .{r2.stderr});
-                            try writeStderrFmt(io, "error: build failed for root package (exit code {d})\n", .{code});
-                            break :root_blk false;
-                        }
-                    },
-                    else => {
-                        try writeStderrFmt(io, "{s}", .{r2.stderr});
-                        try writeStderrFmt(io, "error: build process for root package terminated abnormally\n", .{});
-                        break :root_blk false;
-                    },
-                }
-                break :root_blk true;
-            } else {
-                // Real build failure; forward captured stderr to user.
-                try writeStderrFmt(io, "{s}", .{result.stderr});
-                switch (result.term) {
-                    .exited => |code| try writeStderrFmt(io, "error: build failed for root package (exit code {d})\n", .{code}),
-                    else => try writeStderrFmt(io, "error: build process for root package terminated abnormally\n", .{}),
-                }
-                break :root_blk false;
-            }
+    {
+        const result = try build_fallback.runCapture(allocator, io, argv, root_dir, cap_dir);
+        defer {
+            allocator.free(result.stdout);
+            allocator.free(result.stderr);
         }
-        try writeStderrFmt(io, "error: too many fingerprint correction passes for root package\n", .{});
-        break :root_blk false;
-    };
-    if (!root_ok) return error.BuildFailed;
+        switch (result.term) {
+            .exited => |code| {
+                if (code != 0) {
+                    try writeStderrFmt(io, "{s}", .{result.stderr});
+                    try writeStderrFmt(io, "error: build failed for root package (exit code {d})\n", .{code});
+                    return error.BuildFailed;
+                }
+            },
+            else => {
+                try writeStderrFmt(io, "{s}", .{result.stderr});
+                try writeStderrFmt(io, "error: build process for root package terminated abnormally\n", .{});
+                return error.BuildFailed;
+            },
+        }
+    }
 
     try stdout.print("[done]  {s} (root)\n", .{manifest.package.id.asText()});
     try stdout.flush();

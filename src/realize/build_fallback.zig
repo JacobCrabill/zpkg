@@ -482,9 +482,20 @@ pub const BuildExecutor = struct {
             try dep_map.put(alias_key, dep_path);
         }
 
+        // Read the source fingerprint so the binary adapter carries the same identity.
+        const source_fp: ?u64 = blk: {
+            if (instance.source_path.len == 0) break :blk null;
+            const src_abs = resolveLockfilePath(allocator, self.lockfile_dir, instance.source_path) catch break :blk null;
+            defer allocator.free(src_abs);
+            var sr = realize.SourcePkgRealize.init(allocator, self.io);
+            const fields = sr.readSourceFields(src_abs) catch break :blk null;
+            defer fields.deinitOwned(allocator);
+            break :blk fields.fingerprint;
+        };
+
         // Generate binary adapter.
         var adapter = realize.BinaryAdapter.init(allocator, self.io);
-        try adapter.generate(dest_dir, expanded, artifact_manifest, dep_map);
+        try adapter.generate(dest_dir, expanded, artifact_manifest, dep_map, source_fp);
     }
 
     pub fn execute(
@@ -754,69 +765,29 @@ pub const BuildExecutor = struct {
         defer cap_dir.close(self.io);
 
         // Run `zig build install --prefix <staging_dir>` inside realized_dir.
-        // Multi-pass: patch fingerprint mismatches then retry until success or failure.
-        const build_ok = build_blk: {
-            var pass: usize = 0;
-            while (pass < 20) : (pass += 1) {
-                const result = try runCapture(allocator, self.io,
-                    &.{ "zig", "build", "install", "--prefix", staging_dir },
-                    realized_dir, cap_dir);
-                defer {
-                    allocator.free(result.stdout);
-                    allocator.free(result.stderr);
-                }
-
-                const ok = switch (result.term) {
-                    .exited => |code| code == 0,
-                    else => false,
-                };
-                if (ok) break :build_blk true;
-
-                if (extractSuggestedFingerprint(result.stderr)) |fp| {
-                    if (try extractFingerprintFilePath(allocator, result.stderr)) |fpath| {
-                        defer allocator.free(fpath);
-                        try patchFingerprintInFile(allocator, self.io, fpath, realized_dir, fp);
-                        continue;
-                    }
-                    // No file path; patch the realized dir's own build.zig.zon.
-                    try patchFingerprintInBuildZigZon(allocator, self.io, realized_dir, fp);
-                    // Retry once more — captured so output stays clean.
-                    const r2 = try runCapture(allocator, self.io,
-                        &.{ "zig", "build", "install", "--prefix", staging_dir },
-                        realized_dir, cap_dir);
-                    defer {
-                        allocator.free(r2.stdout);
-                        allocator.free(r2.stderr);
-                    }
-                    switch (r2.term) {
-                        .exited => |code| {
-                            if (code != 0) {
-                                try printRaw(self.io, r2.stderr);
-                                try printStderr(self.io, "error: build failed for '{s}' (exit code {d})\n", .{ display_key, code });
-                                break :build_blk false;
-                            }
-                        },
-                        else => {
-                            try printRaw(self.io, r2.stderr);
-                            try printStderr(self.io, "error: build process for '{s}' terminated abnormally\n", .{display_key});
-                            break :build_blk false;
-                        },
-                    }
-                    break :build_blk true;
-                } else {
-                    // Real build failure; forward captured stderr to user.
-                    try printRaw(self.io, result.stderr);
-                    switch (result.term) {
-                        .exited => |code| try printStderr(self.io, "error: build failed for '{s}' (exit code {d})\n", .{ display_key, code }),
-                        else => try printStderr(self.io, "error: build process for '{s}' terminated abnormally\n", .{display_key}),
-                    }
-                    break :build_blk false;
-                }
+        {
+            const result = try runCapture(allocator, self.io,
+                &.{ "zig", "build", "install", "--prefix", staging_dir },
+                realized_dir, cap_dir);
+            defer {
+                allocator.free(result.stdout);
+                allocator.free(result.stderr);
             }
-            try printStderr(self.io, "error: too many fingerprint correction passes for '{s}'\n", .{display_key});
-            break :build_blk false;
-        };
-        if (!build_ok) return error.BuildFailed;
+            switch (result.term) {
+                .exited => |code| {
+                    if (code != 0) {
+                        try printRaw(self.io, result.stderr);
+                        try printStderr(self.io, "error: build failed for '{s}' (exit code {d})\n", .{ display_key, code });
+                        return error.BuildFailed;
+                    }
+                },
+                else => {
+                    try printRaw(self.io, result.stderr);
+                    try printStderr(self.io, "error: build process for '{s}' terminated abnormally\n", .{display_key});
+                    return error.BuildFailed;
+                },
+            }
+        }
 
         // Build dep_instances list for the manifest.
         const dep_instances = try allocator.alloc(manifest_mod.InstanceRef, instance.deps.len);
@@ -974,151 +945,6 @@ pub fn runCapture(
     return .{ .term = term, .stdout = stdout_bytes, .stderr = stderr_bytes };
 }
 
-/// Scan zig build stderr for the fingerprint suggestion produced by lines like:
-///   "use this value: 0x41a21f2b57209636"
-pub fn extractSuggestedFingerprint(stderr: []const u8) ?u64 {
-    const needle = "use this value: 0x";
-    const start = std.mem.indexOf(u8, stderr, needle) orelse return null;
-    const hex_start = start + needle.len;
-    // Find end of hex digits.
-    var hex_end = hex_start;
-    while (hex_end < stderr.len and std.ascii.isHex(stderr[hex_end])) : (hex_end += 1) {}
-    if (hex_end == hex_start) return null;
-    return std.fmt.parseInt(u64, stderr[hex_start..hex_end], 16) catch null;
-}
-
-/// Rewrite the `fingerprint` field in `<dir>/build.zig.zon` by parsing the file
-/// with zon_util, updating the fingerprint, and regenerating the entire file.
-/// This avoids fragile string-search replacement.
-pub fn patchFingerprintInBuildZigZon(allocator: std.mem.Allocator, io: std.Io, dir: []const u8, fp: u64) !void {
-    var realizer = realize.SourcePkgRealize.init(allocator, io);
-
-    // Read static fields (name, version, paths, etc.) from the workspace build.zig.zon.
-    var fields = try realizer.readSourceFields(dir);
-    defer fields.deinitOwned(allocator);
-    fields.fingerprint = fp;
-
-    // Collect all path deps from the workspace file. Pass an empty resolved map so
-    // every dep in the file is returned as "extra" (they're all path deps here).
-    var empty_resolved = realize.DepPathMap.init(allocator);
-    defer empty_resolved.deinit();
-    var extra_deps = try realizer.readExtraDepsFromSource(dir, empty_resolved);
-    defer {
-        var it = extra_deps.iterator();
-        while (it.next()) |e| {
-            allocator.free(e.key_ptr.*);
-            allocator.free(e.value_ptr.*);
-        }
-        extra_deps.deinit();
-    }
-
-    // Regenerate the file with the corrected fingerprint.
-    var empty_dep_paths = realize.DepPathMap.init(allocator);
-    defer empty_dep_paths.deinit();
-    const zon_content = try realizer.generateBuildZigZon(dir, empty_dep_paths, extra_deps, fields);
-    defer allocator.free(zon_content);
-
-    const dest_dir = try std.Io.Dir.openDirAbsolute(io, dir, .{});
-    defer dest_dir.close(io);
-    try dest_dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = zon_content });
-}
-
-/// Rewrite the `fingerprint` field in the given `build.zig.zon` file (absolute path).
-pub fn patchFingerprintInFile(allocator: std.mem.Allocator, io: std.Io, file_path: []const u8, build_cwd: []const u8, fp: u64) !void {
-    // Zig may report paths as relative (e.g. "build.zig.zon") or as absolute paths
-    // containing ".." (e.g. ".../root/../deps/X/build.zig.zon").
-    // std.fs.path.resolve(cwd, abs_path) concatenates rather than resets when the
-    // second argument is absolute in some Zig versions, producing doubled paths.
-    // Normalise the two cases separately so ".." is always folded correctly.
-    const abs_path = if (std.fs.path.isAbsolute(file_path))
-        try std.fs.path.resolve(allocator, &.{file_path})
-    else
-        try std.fs.path.resolve(allocator, &.{ build_cwd, file_path });
-    defer allocator.free(abs_path);
-
-    // TODO: This is still an issue when using `zig build run` vs `zig-out/bin/zpkg`
-    // TODO: I have no idea why stderr is getting anywhere near this, but :shrug:
-    // if (std.fs.path.isAbsolute(file_path)) {
-    //     std.debug.print("fingerprint resolved path: {s} is absolute\n", .{file_path});
-    // } else {
-    //     std.debug.print("fingerprint resolved path: {s} is NOT absolute\n", .{file_path});
-    // }
-
-    const dir_path = std.Io.Dir.path.dirname(abs_path) orelse build_cwd;
-    const base_name = std.Io.Dir.path.basename(abs_path);
-
-    // std.debug.print("fingerprint resolved path: {s}\n", .{dir_path});
-    const dir_obj = try std.Io.Dir.openDirAbsolute(io, dir_path, .{});
-    defer dir_obj.close(io);
-
-    const content = try dir_obj.readFileAlloc(io, base_name, allocator, .limited(256 * 1024));
-    defer allocator.free(content);
-
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    const w = &aw.writer;
-
-    const fp_needle = ".fingerprint = ";
-    if (std.mem.indexOf(u8, content, fp_needle)) |needle_pos| {
-        // Replace existing fingerprint line.
-        try w.writeAll(content[0 .. needle_pos + fp_needle.len]);
-        try w.print("0x{x:0>16}", .{fp});
-        // Skip old value up to the comma.
-        const after_needle = needle_pos + fp_needle.len;
-        const comma = std.mem.indexOfScalarPos(u8, content, after_needle, ',') orelse content.len;
-        try w.writeAll(content[comma..]);
-    } else {
-        // Insert fingerprint after opening `.{`.
-        const open_brace = std.mem.indexOf(u8, content, ".{\n") orelse {
-            // Unexpected format; just prepend.
-            try w.print(".{{\n    .fingerprint = 0x{x:0>16},\n", .{fp});
-            try w.writeAll(content);
-            const patched = try aw.toOwnedSlice();
-            defer allocator.free(patched);
-            return dir_obj.writeFile(io, .{ .sub_path = base_name, .data = patched });
-        };
-        const insert_at = open_brace + ".{\n".len;
-        try w.writeAll(content[0..insert_at]);
-        try w.print("    .fingerprint = 0x{x:0>16},\n", .{fp});
-        try w.writeAll(content[insert_at..]);
-    }
-
-    const patched = try aw.toOwnedSlice();
-    defer allocator.free(patched);
-    try dir_obj.writeFile(io, .{ .sub_path = base_name, .data = patched });
-}
-
-/// Extract the absolute path to the `build.zig.zon` file that triggered a fingerprint
-/// error. Zig's error format is:
-///   /abs/path/to/build.zig.zon:1:2: error: invalid fingerprint: ...
-/// Returns null if the pattern is not found. Caller owns the returned slice.
-pub fn extractFingerprintFilePath(allocator: std.mem.Allocator, stderr: []const u8) !?[]u8 {
-    const zon_file = "build.zig.zon";
-    var search_pos: usize = 0;
-    while (std.mem.indexOfPos(u8, stderr, search_pos, zon_file)) |idx| {
-        const after = idx + zon_file.len;
-        // Must be followed by ':' (line:col indicator).
-        if (after < stderr.len and stderr[after] == ':') {
-            // Find the start of the line containing this occurrence.
-            const line_start = if (std.mem.lastIndexOfScalar(u8, stderr[0..idx], '\n')) |nl|
-                nl + 1
-            else
-                0;
-            // Strip leading control characters (e.g. \r from Zig's progress display,
-            // which writes \r even to pipes in some builds, making the path appear
-            // absolute in the terminal but start with a non-'/' byte).
-            var path_slice = stderr[line_start..after];
-            while (path_slice.len > 0 and path_slice[0] < 0x20) path_slice = path_slice[1..];
-            if (path_slice.len == 0) {
-                search_pos = after;
-                continue;
-            }
-            return try allocator.dupe(u8, path_slice);
-        }
-        search_pos = after;
-    }
-    return null;
-}
 
 test "planBuild topological order: leaves before parents" {
     const allocator = std.testing.allocator;

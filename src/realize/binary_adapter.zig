@@ -21,8 +21,7 @@ pub const BinaryAdapter = struct {
     ///
     /// Creates:
     ///   - `dest_dir/build.zig`     — exposes prebuilt artifacts as Zig library steps
-    ///   - `dest_dir/build.zig.zon` — declares dep paths; fingerprint starts as 0x0
-    ///                                 (Zig will report the correct value on first use)
+    ///   - `dest_dir/build.zig.zon` — declares dep paths; uses source_fingerprint if provided
     ///   - `dest_dir/{include,lib,bin,share}` — symlinks into the expanded store prefix
     pub fn generate(
         self: *BinaryAdapter,
@@ -30,6 +29,7 @@ pub const BinaryAdapter = struct {
         expanded_prefix: []const u8,
         manifest: store.ArtifactManifest,
         dep_realized_paths: source_pkg.DepPathMap,
+        source_fingerprint: ?u64,
     ) !void {
         const adapter_name = manifest.instance.package_id.asText();
 
@@ -47,7 +47,7 @@ pub const BinaryAdapter = struct {
         defer self.allocator.free(build_zig_zon_abs);
         std.Io.Dir.cwd().deleteFile(self.io, build_zig_zon_abs) catch {};
 
-        const zon_content = try self.generateBuildZigZon(adapter_name, dep_realized_paths, dest_dir);
+        const zon_content = try self.generateBuildZigZon(adapter_name, dep_realized_paths, dest_dir, source_fingerprint);
         defer self.allocator.free(zon_content);
         try self.writeFile(dest_dir, "build.zig.zon", zon_content);
 
@@ -207,12 +207,13 @@ pub const BinaryAdapter = struct {
         return try aw.toOwnedSlice();
     }
 
-    /// Generate the build.zig.zon with placeholder fingerprint and dep paths.
+    /// Generate the build.zig.zon for the binary adapter.
     fn generateBuildZigZon(
         self: *BinaryAdapter,
         adapter_name: []const u8,
         dep_realized_paths: source_pkg.DepPathMap,
         dest_dir: []const u8,
+        source_fingerprint: ?u64,
     ) ![]u8 {
         const allocator = self.allocator;
         var aw: std.Io.Writer.Allocating = .init(allocator);
@@ -224,8 +225,9 @@ pub const BinaryAdapter = struct {
         defer allocator.free(bare_name);
         try w.print("    .name = .{s},\n", .{bare_name});
         try w.writeAll("    .version = \"0.0.0\",\n");
-        // Placeholder; Zig will report the correct value on first use.
-        try w.writeAll("    .fingerprint = 0x0000000000000000,\n");
+        if (source_fingerprint) |fp| {
+            try w.print("    .fingerprint = 0x{x:0>16},\n", .{fp});
+        }
         try w.writeAll("    .paths = .{\".\"},\n");
         try w.writeAll("    .dependencies = .{\n");
 
@@ -436,7 +438,7 @@ test "libVarName produces lib_lower form" {
     try std.testing.expectEqualStrings("lib_foobar", name2);
 }
 
-test "generateBuildZigZon has fingerprint placeholder and no prefix dep" {
+test "generateBuildZigZon has no fingerprint and no prefix dep" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
@@ -444,11 +446,11 @@ test "generateBuildZigZon has fingerprint placeholder and no prefix dep" {
     var empty_deps = source_pkg.DepPathMap.init(allocator);
     defer empty_deps.deinit();
 
-    const zon = try adapter.generateBuildZigZon("zpkg.example.hello_lib", empty_deps, "/fake/dest");
+    const zon = try adapter.generateBuildZigZon("zpkg.example.hello_lib", empty_deps, "/fake/dest", null);
     defer allocator.free(zon);
 
     try std.testing.expect(std.mem.indexOf(u8, zon, ".name = .zpkg_example_hello_lib") != null);
-    try std.testing.expect(std.mem.indexOf(u8, zon, ".fingerprint = 0x0000000000000000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zon, ".fingerprint") == null);
     try std.testing.expect(std.mem.indexOf(u8, zon, ".dependencies = .{") != null);
     // No prefix dep in new format.
     try std.testing.expect(std.mem.indexOf(u8, zon, ".prefix") == null);
