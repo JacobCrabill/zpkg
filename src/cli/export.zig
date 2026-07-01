@@ -28,11 +28,7 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--help") or std.mem.eql(u8, args[i], "-h")) {
-            var buf: [2048]u8 = undefined;
-            var fw: std.Io.File.Writer = .init(.stdout(), io, &buf);
-            const w = &fw.interface;
-            try w.writeAll(help_text);
-            try w.flush();
+            try diag_util.writeHelp(io, help_text);
             return;
         } else if (pkg_root == null) {
             pkg_root = args[i];
@@ -128,18 +124,5 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     try stdout.flush();
 }
 
-fn writeStderr(io: std.Io, text: []const u8) !void {
-    var buf: [2048]u8 = undefined;
-    var f: std.Io.File.Writer = .init(.stderr(), io, &buf);
-    const w = &f.interface;
-    try w.writeAll(text);
-    try w.flush();
-}
-
-fn writeStderrFmt(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
-    var buf: [2048]u8 = undefined;
-    var f: std.Io.File.Writer = .init(.stderr(), io, &buf);
-    const w = &f.interface;
-    try w.print(fmt, args);
-    try w.flush();
-}
+const writeStderr = diag_util.writeStderr;
+const writeStderrFmt = diag_util.writeStderrFmt;

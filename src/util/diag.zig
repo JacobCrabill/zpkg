@@ -1,4 +1,8 @@
-/// Structured diagnostic helpers for CLI commands.
+/// Structured diagnostic and IO helpers for CLI commands.
+///
+/// This is the single home for CLI stdout/stderr writing. Command modules should
+/// route all their output through `writeStdout`/`writeStderr`(`Fmt`)/`writeHelp`
+/// rather than reconstructing a `File.Writer` + buffer + flush in each file.
 const std = @import("std");
 
 /// Resolve a user-supplied path (relative or absolute) to an
@@ -14,6 +18,49 @@ pub fn resolveAbsPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     // join(cwd, ".") would produce "{cwd}/." — the dot is kept as a literal
     // component and throws off relative-path calculations downstream.
     return std.fs.path.resolve(allocator, &.{ cwd, path });
+}
+
+// --- Low-level writers: single source of truth for CLI stdout/stderr. ---------
+
+fn emit(file: std.Io.File, io: std.Io, text: []const u8) !void {
+    var buf: [4096]u8 = undefined;
+    var wf: std.Io.File.Writer = .init(file, io, &buf);
+    const w = &wf.interface;
+    try w.writeAll(text);
+    try w.flush();
+}
+
+fn emitFmt(file: std.Io.File, io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    var buf: [4096]u8 = undefined;
+    var wf: std.Io.File.Writer = .init(file, io, &buf);
+    const w = &wf.interface;
+    try w.print(fmt, args);
+    try w.flush();
+}
+
+/// Write raw text to stdout and flush.
+pub fn writeStdout(io: std.Io, text: []const u8) !void {
+    try emit(.stdout(), io, text);
+}
+
+/// Write formatted text to stdout and flush.
+pub fn writeStdoutFmt(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    try emitFmt(.stdout(), io, fmt, args);
+}
+
+/// Write raw text to stderr and flush.
+pub fn writeStderr(io: std.Io, text: []const u8) !void {
+    try emit(.stderr(), io, text);
+}
+
+/// Write formatted text to stderr and flush.
+pub fn writeStderrFmt(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    try emitFmt(.stderr(), io, fmt, args);
+}
+
+/// Print a command's help text to stdout.
+pub fn writeHelp(io: std.Io, help_text: []const u8) !void {
+    try writeStdout(io, help_text);
 }
 
 pub fn writeError(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
@@ -36,23 +83,7 @@ pub fn writeHint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
     try w.flush();
 }
 
-pub fn writeBuildSummary(io: std.Io, hits: usize, misses: usize, built: usize) !void {
-    var buf: [4096]u8 = undefined;
-    var wf: std.Io.File.Writer = .init(.stdout(), io, &buf);
-    const w = &wf.interface;
-    try w.print(
-        "build summary: {d} cache hit(s), {d} cache miss(es), {d} built\n",
-        .{ hits, misses, built },
-    );
-    try w.flush();
-}
-
 pub fn writeLockfileMissingError(io: std.Io) !void {
     try writeError(io, "no lockfile found", .{});
     try writeHint(io, "run 'zpkg lock <pkg-root>' to create one", .{});
-}
-
-pub fn writeLockfileDriftError(io: std.Io) !void {
-    try writeError(io, "lockfile is out of date with zpkg.zon", .{});
-    try writeHint(io, "run 'zpkg update <pkg-root>' to refresh it", .{});
 }

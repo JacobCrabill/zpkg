@@ -1,5 +1,6 @@
 const std = @import("std");
 const zpkg_schema = @import("../schema/zpkg.zig");
+const diag = @import("../util/diag.zig");
 
 pub const help_text =
     \\zpkg inspect — Inspect package metadata from zpkg.zon
@@ -78,11 +79,7 @@ fn inspectPackageAllocForCli(allocator: std.mem.Allocator, pkg_root: []const u8,
 }
 
 fn writeHelp(io: std.Io) !void {
-    var buf: [2048]u8 = undefined;
-    var f: std.Io.File.Writer = .init(.stdout(), io, &buf);
-    const w = &f.interface;
-    try w.writeAll(help_text);
-    try w.flush();
+    try diag.writeHelp(io, help_text);
 }
 
 fn writeUsageError(io: std.Io) !void {
@@ -99,21 +96,8 @@ fn writeMissingManifestError(io: std.Io, manifest_path: []const u8, err: anyerro
     try writeStderrFmt(io, "error: cannot open manifest {s}: {s}\n", .{ manifest_path, @errorName(err) });
 }
 
-fn writeStderr(io: std.Io, text: []const u8) !void {
-    var stderr_buffer: [4096]u8 = undefined;
-    var stderr_writer_file: std.Io.File.Writer = .init(.stderr(), io, &stderr_buffer);
-    const stderr = &stderr_writer_file.interface;
-    try stderr.writeAll(text);
-    try stderr.flush();
-}
-
-fn writeStderrFmt(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
-    var stderr_buffer: [4096]u8 = undefined;
-    var stderr_writer_file: std.Io.File.Writer = .init(.stderr(), io, &stderr_buffer);
-    const stderr = &stderr_writer_file.interface;
-    try stderr.print(fmt, args);
-    try stderr.flush();
-}
+const writeStderr = diag.writeStderr;
+const writeStderrFmt = diag.writeStderrFmt;
 
 test "inspect renders normalized hello-lib manifest" {
     const allocator = std.testing.allocator;

@@ -7,6 +7,7 @@ const manifest_mod = @import("../store/manifest.zig");
 const instance_key_mod = @import("../hash/instance_key.zig");
 const toolchain_fingerprint_mod = @import("../hash/toolchain_fingerprint.zig");
 const source_hash_mod = @import("../hash/source_hash.zig");
+const diag = @import("../util/diag.zig");
 
 pub const BuildMode = enum { build, build_with_tests, run_tests };
 
@@ -788,21 +789,8 @@ pub const BuildExecutor = struct {
 /// Resolve a lockfile source_path to an absolute path (see realizer.resolveLockfilePath).
 const resolveLockfilePath = realizer_mod.resolveLockfilePath;
 
-fn printStderr(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
-    var buf: [2048]u8 = undefined;
-    var f: std.Io.File.Writer = .init(.stderr(), io, &buf);
-    const w = &f.interface;
-    try w.print(fmt, args);
-    try w.flush();
-}
-
-fn printRaw(io: std.Io, text: []const u8) !void {
-    var buf: [4096]u8 = undefined;
-    var f: std.Io.File.Writer = .init(.stderr(), io, &buf);
-    const w = &f.interface;
-    try w.writeAll(text);
-    try w.flush();
-}
+const printStderr = diag.writeStderrFmt;
+const printRaw = diag.writeStderr;
 
 /// Monotonic counter for unique capture-file names; shared across threads.
 var capture_seq = std.atomic.Value(u32).init(0);

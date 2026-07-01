@@ -161,26 +161,6 @@ fn writeIndent(writer: *std.Io.Writer, depth: usize) !void {
     }
 }
 
-fn writeStdout(io: std.Io, text: []const u8) !void {
-    var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer_file: std.Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
-    const stdout = &stdout_writer_file.interface;
-    try stdout.writeAll(text);
-    try stdout.flush();
-}
-
-fn writeStderr(io: std.Io, text: []const u8) !void {
-    var stderr_buffer: [4096]u8 = undefined;
-    var stderr_writer_file: std.Io.File.Writer = .init(.stderr(), io, &stderr_buffer);
-    const stderr = &stderr_writer_file.interface;
-    try stderr.writeAll(text);
-    try stderr.flush();
-}
-
-fn writeStderrFmt(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
-    var stderr_buffer: [4096]u8 = undefined;
-    var stderr_writer_file: std.Io.File.Writer = .init(.stderr(), io, &stderr_buffer);
-    const stderr = &stderr_writer_file.interface;
-    try stderr.print(fmt, args);
-    try stderr.flush();
-}
+const writeStdout = diag.writeStdout;
+const writeStderr = diag.writeStderr;
+const writeStderrFmt = diag.writeStderrFmt;

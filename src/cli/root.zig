@@ -8,6 +8,7 @@ const build_cmd = @import("build.zig");
 const test_cmd = @import("test_cmd.zig");
 const export_cmd = @import("export.zig");
 const workspace = @import("../util/workspace.zig");
+const diag = @import("../util/diag.zig");
 
 pub const help_text =
     \\zpkg - Zig package workspace realizer
@@ -65,20 +66,12 @@ pub fn shouldShowHelp(args: []const []const u8) bool {
 }
 
 fn writeHelp(io: std.Io) !void {
-    var stdout_buffer: [2048]u8 = undefined;
-    var stdout_writer_file: std.Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
-    const stdout = &stdout_writer_file.interface;
-    try stdout.writeAll(help_text);
-    try stdout.flush();
+    try diag.writeHelp(io, help_text);
 }
 
 fn writeUnknownCommand(io: std.Io, command: []const u8) !void {
-    var stderr_buffer: [2048]u8 = undefined;
-    var stderr_writer_file: std.Io.File.Writer = .init(.stderr(), io, &stderr_buffer);
-    const stderr = &stderr_writer_file.interface;
-    try stderr.print("error: unknown command: {s}\n\n", .{command});
-    try stderr.writeAll(help_text);
-    try stderr.flush();
+    try diag.writeStderrFmt(io, "error: unknown command: {s}\n\n", .{command});
+    try diag.writeStderr(io, help_text);
     return error.InvalidArgument;
 }
 

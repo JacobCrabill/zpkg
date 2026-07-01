@@ -126,11 +126,7 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
 }
 
 fn writeHelp(io: std.Io) !void {
-    var buf: [2048]u8 = undefined;
-    var fw: std.Io.File.Writer = .init(.stdout(), io, &buf);
-    const w = &fw.interface;
-    try w.writeAll(help_text);
-    try w.flush();
+    try diag_util.writeHelp(io, help_text);
 }
 
 fn writeUsageError(io: std.Io) !void {
@@ -155,21 +151,8 @@ fn writeFileError(io: std.Io, err: anyerror) !void {
     try writeStderrFmt(io, "error: failed to write lockfile: {s}\n", .{@errorName(err)});
 }
 
-fn writeStderr(io: std.Io, text: []const u8) !void {
-    var stderr_buffer: [4096]u8 = undefined;
-    var stderr_writer_file: std.Io.File.Writer = .init(.stderr(), io, &stderr_buffer);
-    const stderr = &stderr_writer_file.interface;
-    try stderr.writeAll(text);
-    try stderr.flush();
-}
-
-fn writeStderrFmt(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
-    var stderr_buffer: [4096]u8 = undefined;
-    var stderr_writer_file: std.Io.File.Writer = .init(.stderr(), io, &stderr_buffer);
-    const stderr = &stderr_writer_file.interface;
-    try stderr.print(fmt, args);
-    try stderr.flush();
-}
+const writeStderr = diag_util.writeStderr;
+const writeStderrFmt = diag_util.writeStderrFmt;
 
 fn generateLockfile(allocator: std.mem.Allocator, io: std.Io, pkg_root: []const u8, resolved: resolve.ResolvedRoot, resolver: *resolve.Resolver) !model.Lockfile {
     const cloned_id = try resolved.package_id.cloneOwned(allocator);
