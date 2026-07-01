@@ -15,13 +15,16 @@ pub const SourcePkgRealize = struct {
     ///
     /// - Creates a symlink from dest_dir/<entry> → source_dir/<entry> for each
     ///   entry in the source directory.  (Full-dir symlink if scanning fails.)
-    /// - Writes a generated build.zig.zon at dest_dir with local path deps.
+    /// - Writes a build.zig.zon at dest_dir that is the source build.zig.zon
+    ///   with only the `.dependencies` field replaced by workspace-local paths.
+    ///   All other fields (name, version, fingerprint, paths, etc.) are copied
+    ///   verbatim.
     /// - Copies zpkg.graph.zon into dest_dir if it exists in source_dir.
     pub fn realize(
         self: *SourcePkgRealize,
         source_dir: []const u8,
         dest_dir: []const u8,
-        pkg_name: []const u8,  // kept for caller compatibility; name is now sourced from build.zig.zon
+        pkg_name: []const u8, // kept for caller compatibility; name is now sourced from build.zig.zon
         dep_realized_paths: DepPathMap,
     ) !void {
         _ = pkg_name;
@@ -38,8 +41,10 @@ pub const SourcePkgRealize = struct {
 
         // Read all static fields from the source build.zig.zon (everything except
         // .dependencies, which we replace with workspace-local paths).
-        const source_fields = try self.readSourceFields(source_dir);
-        defer source_fields.deinitOwned(self.allocator);
+        const src_dir_obj = try std.Io.Dir.openDirAbsolute(self.io, source_dir, .{});
+        defer src_dir_obj.close(self.io);
+        const source_content = try src_dir_obj.readFileAlloc(self.io, "build.zig.zon", self.allocator, .limited(64 * 1024));
+        defer self.allocator.free(source_content);
 
         // Collect extra build-tool deps (e.g. `zpkg-build`) not in the resolved map.
         var extra_deps = try self.readExtraDepsFromSource(source_dir, dep_realized_paths);
@@ -52,7 +57,7 @@ pub const SourcePkgRealize = struct {
             extra_deps.deinit();
         }
 
-        const zon_content = try self.generateBuildZigZon(dest_dir, dep_realized_paths, extra_deps, source_fields);
+        const zon_content = try self.rewriteDependencies(source_content, dest_dir, dep_realized_paths, extra_deps);
         defer self.allocator.free(zon_content);
         try self.writeFile(dest_dir, "build.zig.zon", zon_content);
 
@@ -244,40 +249,64 @@ pub const SourcePkgRealize = struct {
         return result;
     }
 
-    /// Generate the build.zig.zon content.  All static fields are copied verbatim
-    /// from `fields` (sourced from the package's real build.zig.zon); only
-    /// `.dependencies` is replaced with workspace-local paths.
+    /// Copy source_content verbatim, replacing only the `.dependencies` field
+    /// with workspace-local paths.  All other fields — including name, version,
+    /// fingerprint, minimum_zig_version, paths — are preserved exactly as written.
     ///
-    /// Determinism guarantee: dependency entries are emitted in lexicographic order.
-    pub fn generateBuildZigZon(
+    /// Dependency entries are emitted in lexicographic order for determinism.
+    pub fn rewriteDependencies(
+        self: *SourcePkgRealize,
+        source_content: []const u8,
+        dest_dir: []const u8,
+        dep_realized_paths: DepPathMap,
+        extra_deps: DepPathMap,
+    ) ![]u8 {
+        const new_deps = try self.buildDepsSection(dest_dir, dep_realized_paths, extra_deps);
+        defer self.allocator.free(new_deps);
+
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        const w = &aw.writer;
+
+        if (findDepsFieldSpan(source_content)) |span| {
+            try w.writeAll(source_content[0..span.start]);
+            try w.writeAll(new_deps);
+            try w.writeAll(source_content[span.end..]);
+        } else {
+            // No .dependencies field: insert before the final `}`
+            if (std.mem.lastIndexOfScalar(u8, source_content, '}')) |last_brace| {
+                try w.writeAll(source_content[0..last_brace]);
+                try w.writeAll("    ");
+                try w.writeAll(new_deps);
+                try w.writeByte('\n');
+                try w.writeAll(source_content[last_brace..]);
+            } else {
+                return self.allocator.dupe(u8, source_content);
+            }
+        }
+
+        return try aw.toOwnedSlice();
+    }
+
+    /// Generate the `.dependencies = .{...},\n` replacement block.
+    fn buildDepsSection(
         self: *SourcePkgRealize,
         dest_dir: []const u8,
         dep_realized_paths: DepPathMap,
         extra_deps: DepPathMap,
-        fields: SourceFields,
     ) ![]u8 {
         var aw: std.Io.Writer.Allocating = .init(self.allocator);
         defer aw.deinit();
         const w = &aw.writer;
 
-        try w.writeAll(".{\n");
-        try w.print("    .name = {s},\n", .{fields.name});
-        try w.print("    .version = {s},\n", .{fields.version});
-        if (fields.fingerprint) |fp| {
-            try w.print("    .fingerprint = 0x{x:0>16},\n", .{fp});
-        }
-        if (fields.minimum_zig_version) |mzv| {
-            try w.print("    .minimum_zig_version = {s},\n", .{mzv});
-        }
-        try w.writeAll("    .dependencies = .{\n");
+        try w.writeAll(".dependencies = .{\n");
 
-        // Collect all dep keys (resolved + extra), sort for stable output.
-        var keys = std.ArrayList([]const u8).empty;
+        var keys: std.ArrayList([]const u8) = .empty;
         defer keys.deinit(self.allocator);
-        var key_iter = dep_realized_paths.keyIterator();
-        while (key_iter.next()) |k| try keys.append(self.allocator, k.*);
-        var extra_iter = extra_deps.keyIterator();
-        while (extra_iter.next()) |k| try keys.append(self.allocator, k.*);
+        var it1 = dep_realized_paths.keyIterator();
+        while (it1.next()) |k| try keys.append(self.allocator, k.*);
+        var it2 = extra_deps.keyIterator();
+        while (it2.next()) |k| try keys.append(self.allocator, k.*);
         std.mem.sort([]const u8, keys.items, {}, struct {
             fn lessThan(_: void, a: []const u8, b: []const u8) bool {
                 return std.mem.order(u8, a, b) == .lt;
@@ -296,16 +325,6 @@ pub const SourcePkgRealize = struct {
         }
 
         try w.writeAll("    },\n");
-        try w.writeAll("    .paths = .{\n");
-        for (fields.paths) |p| {
-            // build.zig.zon is regenerated by zpkg for each workspace; excluding it
-            // from .paths keeps the fingerprint stable across machines and dep rewrites.
-            if (std.mem.eql(u8, p, "build.zig.zon")) continue;
-            try w.print("        \"{s}\",\n", .{p});
-        }
-        try w.writeAll("    },\n");
-        try w.writeAll("}\n");
-
         return try aw.toOwnedSlice();
     }
 };
@@ -325,16 +344,16 @@ fn isBareIdentifier(name: []const u8) bool {
     }
     // Reject Zig keywords that would be invalid as bare field names.
     const keywords = [_][]const u8{
-        "addrspace", "align",    "allowzero", "and",      "anyframe",
-        "anytype",   "asm",      "async",     "await",    "break",
-        "callconv",  "catch",    "comptime",  "const",    "continue",
-        "defer",     "else",     "enum",      "errdefer", "error",
-        "export",    "extern",   "fn",        "for",      "if",
-        "inline",    "linksection", "noalias", "noinline", "nosuspend",
-        "opaque",    "or",       "orelse",    "packed",   "pub",
-        "resume",    "return",   "struct",    "suspend",  "switch",
-        "test",      "threadlocal", "try",    "union",    "unreachable",
-        "usingnamespace", "var", "volatile",  "while",
+        "addrspace",      "align",       "allowzero", "and",      "anyframe",
+        "anytype",        "asm",         "async",     "await",    "break",
+        "callconv",       "catch",       "comptime",  "const",    "continue",
+        "defer",          "else",        "enum",      "errdefer", "error",
+        "export",         "extern",      "fn",        "for",      "if",
+        "inline",         "linksection", "noalias",   "noinline", "nosuspend",
+        "opaque",         "or",          "orelse",    "packed",   "pub",
+        "resume",         "return",      "struct",    "suspend",  "switch",
+        "test",           "threadlocal", "try",       "union",    "unreachable",
+        "usingnamespace", "var",         "volatile",  "while",
     };
     for (keywords) |kw| {
         if (std.mem.eql(u8, name, kw)) return false;
@@ -390,86 +409,161 @@ fn relativePath(allocator: std.mem.Allocator, from_dir: []const u8, to_path: []c
     return result.toOwnedSlice(allocator);
 }
 
-test "generateBuildZigZon produces correct content" {
+/// Locate the `.dependencies = .{...},` field in a ZON source string and return
+/// its byte span [start, end).  `start` is the position of the `.` that begins
+/// `.dependencies`; `end` is just past the `\n` that follows the closing `,`.
+///
+/// Returns null if the field is absent or the source is malformed.
+fn findDepsFieldSpan(source: []const u8) ?struct { start: usize, end: usize } {
+    const dep_name = ".dependencies";
+    var search: usize = 0;
+    while (search < source.len) {
+        const idx = std.mem.indexOfPos(u8, source, search, dep_name) orelse return null;
+
+        // The first non-whitespace character after `.dependencies` must be `=`.
+        var pos = idx + dep_name.len;
+        while (pos < source.len and (source[pos] == ' ' or source[pos] == '\t')) : (pos += 1) {}
+        if (pos >= source.len or source[pos] != '=') {
+            search = idx + 1;
+            continue;
+        }
+
+        // Skip past `=` and any surrounding whitespace to reach the value.
+        pos += 1;
+        while (pos < source.len and (source[pos] == ' ' or source[pos] == '\t' or
+            source[pos] == '\n' or source[pos] == '\r')) : (pos += 1)
+        {}
+
+        // The value must start with `.{` (a struct literal).
+        if (pos < source.len and source[pos] == '.') pos += 1;
+        if (pos >= source.len or source[pos] != '{') {
+            search = idx + 1;
+            continue;
+        }
+
+        // Count braces to find the matching `}`.  Skip string contents to avoid
+        // treating `{` or `}` inside a path string as structural.
+        var depth: usize = 0;
+        while (pos < source.len) : (pos += 1) {
+            switch (source[pos]) {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if (depth == 0) {
+                        pos += 1; // step past `}`
+                        while (pos < source.len and (source[pos] == ' ' or source[pos] == '\t')) : (pos += 1) {}
+                        if (pos < source.len and source[pos] == ',') pos += 1;
+                        if (pos < source.len and source[pos] == '\n') pos += 1;
+                        return .{ .start = idx, .end = pos };
+                    }
+                },
+                '"' => {
+                    pos += 1;
+                    while (pos < source.len) : (pos += 1) {
+                        if (source[pos] == '\\') {
+                            pos += 1;
+                            continue;
+                        }
+                        if (source[pos] == '"') break;
+                    }
+                },
+                else => {},
+            }
+        }
+        return null; // unclosed brace — malformed ZON
+    }
+    return null;
+}
+
+test "rewriteDependencies preserves all source fields verbatim" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
+    _ = io;
 
-    var realizer = SourcePkgRealize.init(allocator, io);
+    const source =
+        \\.{
+        \\    .name = .hello_app,
+        \\    .version = "0.1.0",
+        \\    .fingerprint = 0x14ba26c846ee8ffc,
+        \\    .minimum_zig_version = "0.16.0",
+        \\    .dependencies = .{
+        \\        .old_dep = .{ .path = "old/path" },
+        \\    },
+        \\    .paths = .{
+        \\        "build.zig",
+        \\        "src",
+        \\    },
+        \\}
+        \\
+    ;
+
+    const dest = "/project/.zpkg/work/debug-native/root";
     var dep_map = DepPathMap.init(allocator);
     defer dep_map.deinit();
     try dep_map.put("hello_lib", "/project/.zpkg/work/debug-native/deps/zpkg.example.hello_lib#target");
 
     var empty_extra = DepPathMap.init(allocator);
     defer empty_extra.deinit();
-    const fields = SourcePkgRealize.SourceFields{
-        .name = ".hello_app",
-        .fingerprint = null,
-        .version = "\"0.1.0\"",
-        .minimum_zig_version = "\"0.16.0\"",
-        .paths = @constCast(&[_][]const u8{ "build.zig", "src" }),
-    };
-    const content = try realizer.generateBuildZigZon(
-        "/project/.zpkg/work/debug-native/root",
-        dep_map,
-        empty_extra,
-        fields,
-    );
+
+    var realizer = SourcePkgRealize.init(allocator, std.testing.io);
+    const content = try realizer.rewriteDependencies(source, dest, dep_map, empty_extra);
     defer allocator.free(content);
 
+    // All non-dependencies fields must be preserved exactly.
     try std.testing.expect(std.mem.indexOf(u8, content, ".name = .hello_app") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, ".version = \"0.1.0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, ".fingerprint = 0x14ba26c846ee8ffc") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, ".minimum_zig_version = \"0.16.0\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, content, ".paths = .{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"build.zig\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"src\"") != null);
+    // New dep present, old dep gone.
     try std.testing.expect(std.mem.indexOf(u8, content, "hello_lib") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "old_dep") == null);
     try std.testing.expect(std.mem.indexOf(u8, content, ".path =") != null);
 }
 
-test "generateBuildZigZon output is deterministic with multiple deps" {
-    // Two maps with the same entries inserted in opposite order must produce
-    // identical ZON output.  This verifies that we sort before emitting.
+test "rewriteDependencies output is deterministic with multiple deps" {
     const allocator = std.testing.allocator;
-    const io = std.testing.io;
 
+    const source =
+        \\.{
+        \\    .name = .mypkg,
+        \\    .version = "0.0.0",
+        \\    .dependencies = .{},
+        \\    .paths = .{"."},
+        \\}
+        \\
+    ;
     const dest = "/project/.zpkg/work/debug-native/root";
-    const dep_a_path = "/project/.zpkg/work/debug-native/deps/zpkg.example.alpha";
-    const dep_b_path = "/project/.zpkg/work/debug-native/deps/zpkg.example.beta";
+    const dep_a = "/project/.zpkg/work/debug-native/deps/zpkg.example.alpha";
+    const dep_b = "/project/.zpkg/work/debug-native/deps/zpkg.example.beta";
 
     var map1 = DepPathMap.init(allocator);
     defer map1.deinit();
-    try map1.put("alpha", dep_a_path);
-    try map1.put("beta", dep_b_path);
+    try map1.put("alpha", dep_a);
+    try map1.put("beta", dep_b);
 
     var map2 = DepPathMap.init(allocator);
     defer map2.deinit();
-    // Insert in reverse order — if we relied on HashMap order, outputs would differ.
-    try map2.put("beta", dep_b_path);
-    try map2.put("alpha", dep_a_path);
+    try map2.put("beta", dep_b);
+    try map2.put("alpha", dep_a);
 
-    const fields = SourcePkgRealize.SourceFields{
-        .name = ".mypkg",
-        .fingerprint = null,
-        .version = "\"0.0.0\"",
-        .minimum_zig_version = null,
-        .paths = @constCast(&[_][]const u8{"."}),
-    };
     var empty1 = DepPathMap.init(allocator);
     defer empty1.deinit();
     var empty2 = DepPathMap.init(allocator);
     defer empty2.deinit();
-    var r1 = SourcePkgRealize.init(allocator, io);
-    const out1 = try r1.generateBuildZigZon(dest, map1, empty1, fields);
+
+    var r1 = SourcePkgRealize.init(allocator, std.testing.io);
+    const out1 = try r1.rewriteDependencies(source, dest, map1, empty1);
     defer allocator.free(out1);
 
-    var r2 = SourcePkgRealize.init(allocator, io);
-    const out2 = try r2.generateBuildZigZon(dest, map2, empty2, fields);
+    var r2 = SourcePkgRealize.init(allocator, std.testing.io);
+    const out2 = try r2.rewriteDependencies(source, dest, map2, empty2);
     defer allocator.free(out2);
 
     try std.testing.expectEqualStrings(out1, out2);
-
-    // Also verify alpha appears before beta in the output.
-    const alpha_pos = std.mem.indexOf(u8, out1, "alpha").?;
-    const beta_pos = std.mem.indexOf(u8, out1, "beta").?;
-    try std.testing.expect(alpha_pos < beta_pos);
+    // alpha must appear before beta.
+    try std.testing.expect(std.mem.indexOf(u8, out1, "alpha").? < std.mem.indexOf(u8, out1, "beta").?);
 }
 
 test "relativePath computes sibling path" {
@@ -486,34 +580,33 @@ test "relativePath computes deeper path" {
     try std.testing.expectEqualStrings("../deps/mypkg", rel);
 }
 
-test "generateBuildZigZon quotes dep names that are not bare identifiers" {
+test "rewriteDependencies quotes dep names that are not bare identifiers" {
     const allocator = std.testing.allocator;
-    const io = std.testing.io;
 
+    const source =
+        \\.{
+        \\    .name = .mypkg,
+        \\    .version = "0.0.0",
+        \\    .dependencies = .{},
+        \\    .paths = .{"."},
+        \\}
+        \\
+    ;
     const dest = "/project/.zpkg/work/debug-native/root";
     var dep_map = DepPathMap.init(allocator);
     defer dep_map.deinit();
     try dep_map.put("hello-lib", "/project/.zpkg/work/debug-native/deps/hello-lib");
     try dep_map.put("hello_lib", "/project/.zpkg/work/debug-native/deps/hello_lib");
 
-    var empty_extra2 = DepPathMap.init(allocator);
-    defer empty_extra2.deinit();
-    var realizer = SourcePkgRealize.init(allocator, io);
-    const fields2 = SourcePkgRealize.SourceFields{
-        .name = ".mypkg",
-        .fingerprint = null,
-        .version = "\"0.0.0\"",
-        .minimum_zig_version = null,
-        .paths = @constCast(&[_][]const u8{"."}),
-    };
-    const content = try realizer.generateBuildZigZon(dest, dep_map, empty_extra2, fields2);
+    var empty_extra = DepPathMap.init(allocator);
+    defer empty_extra.deinit();
+
+    var realizer = SourcePkgRealize.init(allocator, std.testing.io);
+    const content = try realizer.rewriteDependencies(source, dest, dep_map, empty_extra);
     defer allocator.free(content);
 
-    // hello-lib has a hyphen — must be wrapped with @"..."
     try std.testing.expect(std.mem.indexOf(u8, content, ".@\"hello-lib\"") != null);
-    // hello_lib is a valid bare identifier — must NOT be wrapped
     try std.testing.expect(std.mem.indexOf(u8, content, ".hello_lib") != null);
-    // Ensure the bare version is not accidentally emitted for the hyphenated name
     try std.testing.expect(std.mem.indexOf(u8, content, ".hello-lib") == null);
 }
 
