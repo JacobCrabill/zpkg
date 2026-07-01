@@ -24,10 +24,8 @@ pub const SourcePkgRealize = struct {
         self: *SourcePkgRealize,
         source_dir: []const u8,
         dest_dir: []const u8,
-        pkg_name: []const u8, // kept for caller compatibility; name is now sourced from build.zig.zon
         dep_realized_paths: DepPathMap,
     ) !void {
-        _ = pkg_name;
         // Symlink every top-level entry from source into dest.
         self.symlinkEntries(source_dir, dest_dir) catch {
             // Fallback: symlink entire source_dir as "src"
@@ -47,7 +45,7 @@ pub const SourcePkgRealize = struct {
         defer self.allocator.free(source_content);
 
         // Collect extra build-tool deps (e.g. `zpkg-build`) not in the resolved map.
-        var extra_deps = try self.readExtraDepsFromSource(source_dir, dep_realized_paths);
+        var extra_deps = try self.readExtraDepsFromSource(source_dir, source_content, dep_realized_paths);
         defer {
             var it = extra_deps.iterator();
             while (it.next()) |e| {
@@ -113,13 +111,16 @@ pub const SourcePkgRealize = struct {
     }
 
 
-    /// Parse the source build.zig.zon and return a map of dep_name → absolute_path
-    /// for dependencies NOT already present in `resolved_deps`.  These are build-tool
-    /// deps (e.g. `zpkg-build`) that the source build.zig needs but that zpkg doesn't
-    /// manage through the lockfile.  Caller owns all keys and values in the returned map.
+    /// Parse `source_content` (the source build.zig.zon) and return a map of
+    /// dep_name → absolute_path for dependencies NOT already present in
+    /// `resolved_deps`.  These are build-tool deps (e.g. `zpkg-build`) that the
+    /// source build.zig needs but that zpkg doesn't manage through the lockfile.
+    /// Relative dep paths are resolved against `source_dir`.  Caller owns all keys
+    /// and values in the returned map.
     pub fn readExtraDepsFromSource(
         self: *SourcePkgRealize,
         source_dir: []const u8,
+        source_content: []const u8,
         resolved_deps: DepPathMap,
     ) !DepPathMap {
         var result = DepPathMap.init(self.allocator);
@@ -132,11 +133,7 @@ pub const SourcePkgRealize = struct {
             result.deinit();
         }
 
-        const src_dir_obj = std.Io.Dir.openDirAbsolute(self.io, source_dir, .{}) catch return result;
-        defer src_dir_obj.close(self.io);
-        const content = src_dir_obj.readFileAlloc(self.io, "build.zig.zon", self.allocator, .limited(64 * 1024)) catch return result;
-        defer self.allocator.free(content);
-        const sentinel = self.allocator.dupeZ(u8, content) catch return result;
+        const sentinel = self.allocator.dupeZ(u8, source_content) catch return result;
         defer self.allocator.free(sentinel);
 
         var doc = zon_util.parseDocument(self.allocator, sentinel) catch return result;
@@ -561,32 +558,6 @@ test "isBareIdentifier rejects keywords and non-identifier chars" {
     try std.testing.expect(isBareIdentifier("struct") == false);
 }
 
-/// Helper for tests: create a temp dir under /tmp with a unique name, write
-/// build.zig.zon, run the callback, then delete the dir.
-fn withTmpZon(
-    io: std.Io,
-    dir_name: []const u8,
-    zon_content: []const u8,
-) ![]u8 {
-    // Return the absolute path; caller is responsible for cleanup.
-    const tmp_path = try std.fmt.allocPrint(std.testing.allocator, "/tmp/{s}", .{dir_name});
-    std.Io.Dir.createDirAbsolute(io, tmp_path, .default_dir) catch |e| switch (e) {
-        error.PathAlreadyExists => {},
-        else => return e,
-    };
-    const dir_obj = try std.Io.Dir.openDirAbsolute(io, tmp_path, .{});
-    defer dir_obj.close(io);
-    try dir_obj.writeFile(io, .{ .sub_path = "build.zig.zon", .data = zon_content });
-    return tmp_path;
-}
-
-fn cleanupTmpDir(io: std.Io, tmp_path: []const u8) void {
-    const parent = std.Io.Dir.openDirAbsolute(io, "/tmp", .{}) catch return;
-    defer parent.close(io);
-    // sub_path relative to /tmp
-    const base = std.fs.path.basename(tmp_path);
-    parent.deleteTree(io, base) catch {};
-}
 
 test "readExtraDepsFromSource skips URL deps" {
     const allocator = std.testing.allocator;
@@ -608,17 +579,11 @@ test "readExtraDepsFromSource skips URL deps" {
         \\    },
         \\}
     ;
-    const tmp_path = try withTmpZon(io, "zpkg_test_reds_url", zon);
-    defer {
-        cleanupTmpDir(io, tmp_path);
-        allocator.free(tmp_path);
-    }
-
     var resolved = DepPathMap.init(allocator);
     defer resolved.deinit();
 
     var realizer = SourcePkgRealize.init(allocator, io);
-    var extra = try realizer.readExtraDepsFromSource(tmp_path, resolved);
+    var extra = try realizer.readExtraDepsFromSource("/fake/src", zon, resolved);
     defer {
         var it = extra.iterator();
         while (it.next()) |e| {
@@ -651,17 +616,11 @@ test "readExtraDepsFromSource handles multi-line dep entries" {
         \\    },
         \\}
     ;
-    const tmp_path = try withTmpZon(io, "zpkg_test_reds_multiline", zon);
-    defer {
-        cleanupTmpDir(io, tmp_path);
-        allocator.free(tmp_path);
-    }
-
     var resolved = DepPathMap.init(allocator);
     defer resolved.deinit();
 
     var realizer = SourcePkgRealize.init(allocator, io);
-    var extra = try realizer.readExtraDepsFromSource(tmp_path, resolved);
+    var extra = try realizer.readExtraDepsFromSource("/fake/src", zon, resolved);
     defer {
         var it = extra.iterator();
         while (it.next()) |e| {
@@ -690,19 +649,13 @@ test "readExtraDepsFromSource skips resolved deps" {
         \\    },
         \\}
     ;
-    const tmp_path = try withTmpZon(io, "zpkg_test_reds_resolved", zon);
-    defer {
-        cleanupTmpDir(io, tmp_path);
-        allocator.free(tmp_path);
-    }
-
     // Mark managed_dep as already resolved.
     var resolved = DepPathMap.init(allocator);
     defer resolved.deinit();
     try resolved.put("managed_dep", "/some/path");
 
     var realizer = SourcePkgRealize.init(allocator, io);
-    var extra = try realizer.readExtraDepsFromSource(tmp_path, resolved);
+    var extra = try realizer.readExtraDepsFromSource("/fake/src", zon, resolved);
     defer {
         var it = extra.iterator();
         while (it.next()) |e| {

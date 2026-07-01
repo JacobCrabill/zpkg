@@ -146,7 +146,7 @@ pub const Realizer = struct {
         defer self.allocator.free(dest_dir);
         var dep_map = try self.buildDepMap(instance.deps);
         defer self.freeDepMap(&dep_map);
-        try self.writeSourceRealization(source_dir, dest_dir, instance.package_id.asText(), dep_map);
+        try self.writeSourceRealization(source_dir, dest_dir, dep_map);
     }
 
     /// Low-level source realization with a caller-provided dep map.  Used for the
@@ -156,11 +156,10 @@ pub const Realizer = struct {
         self: Realizer,
         source_dir: []const u8,
         dest_dir: []const u8,
-        pkg_id_text: []const u8,
         dep_map: DepPathMap,
     ) !void {
         var sr = source_pkg.SourcePkgRealize.init(self.allocator, self.io);
-        try sr.realize(source_dir, dest_dir, pkg_id_text, dep_map);
+        try sr.realize(source_dir, dest_dir, dep_map);
     }
 
     /// Ensure `deps/<display_key>/` exists and return its absolute path (caller owns).

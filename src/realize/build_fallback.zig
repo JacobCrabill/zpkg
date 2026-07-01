@@ -364,7 +364,7 @@ fn buildWorker(ctx: *WorkerCtx) void {
         f.interface.flush() catch {};
     }
 
-    ctx.executor.buildInstance(ctx.instance, ctx.display_key, ctx.store_key, ctx.lockfile, ctx.mode) catch |err| {
+    ctx.executor.buildInstance(ctx.instance, ctx.display_key, ctx.store_key, ctx.mode) catch |err| {
         ctx.failed.store(true, .release);
         if (err == error.TestsFailed) ctx.test_failed.store(true, .release);
         ctx.stdout_mutex.lockUncancelable(ctx.executor.io);
@@ -546,7 +546,7 @@ pub const BuildExecutor = struct {
                     try stdout.print("[build] {s}  {s}\n", .{ key, short_key });
                     try stdout.flush();
 
-                    self.buildInstance(instance, key, store_key, lockfile, plan.mode) catch |err| {
+                    self.buildInstance(instance, key, store_key, plan.mode) catch |err| {
                         if (err == error.TestsFailed) {
                             any_test_failed = true;
                             try stdout.print("[fail]  {s}  {s} (tests failed)\n", .{ key, short_key });
@@ -632,7 +632,6 @@ pub const BuildExecutor = struct {
         instance: *const model.lockfile.Instance,
         display_key: []const u8,
         store_key: []const u8,
-        lockfile: model.Lockfile,
         mode: BuildMode,
     ) !void {
         const allocator = self.allocator;
@@ -755,7 +754,6 @@ pub const BuildExecutor = struct {
             .selected_options = selected_options,
             .dep_instances = dep_instances,
         };
-        _ = lockfile; // suppress unused warning
         // Use the content-addressed store_key for the store directory name.
         try self.store.storeArtifact(store_key, staging_dir, artifact_manifest);
 

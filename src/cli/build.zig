@@ -200,7 +200,7 @@ fn buildRoot(
     var root_dep_map = try r.buildRootDepMap(manifest.deps, lockfile);
     defer r.freeDepMap(&root_dep_map);
 
-    r.writeSourceRealization(pkg_root, root_dir, manifest.package.id.asText(), root_dep_map) catch |err| {
+    r.writeSourceRealization(pkg_root, root_dir, root_dep_map) catch |err| {
         try writeStderrFmt(io, "error: failed to realize root package: {s}\n", .{@errorName(err)});
         return error.RealizeFailed;
     };

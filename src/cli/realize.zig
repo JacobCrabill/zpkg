@@ -155,7 +155,7 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
         var root_dep_map = try r.buildRootDepMap(manifest.deps, lockfile);
         defer r.freeDepMap(&root_dep_map);
 
-        r.writeSourceRealization(pkg_root, root_dir, manifest.package.id.asText(), root_dep_map) catch |err| {
+        r.writeSourceRealization(pkg_root, root_dir, root_dep_map) catch |err| {
             try writeStderrFmt(io, "warning: failed to realize root package: {s}\n", .{@errorName(err)});
         };
     }
