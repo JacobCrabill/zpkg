@@ -1,5 +1,4 @@
 const std = @import("std");
-const store = @import("../store/root.zig");
 const source_pkg = @import("source_pkg.zig");
 
 const prefix_dirs = [_][]const u8{ "include", "lib", "bin", "share" };
@@ -20,19 +19,23 @@ pub const BinaryAdapter = struct {
     /// Generate a binary adapter package at `dest_dir`.
     ///
     /// Creates:
-    ///   - `dest_dir/build.zig`     — exposes prebuilt artifacts as Zig library steps
-    ///   - `dest_dir/build.zig.zon` — declares dep paths; uses source_fingerprint if provided
+    ///   - `dest_dir/build.zig`     — synthetic; exposes prebuilt artifacts as Zig
+    ///                                library steps without recompiling
+    ///   - `dest_dir/build.zig.zon` — the source package's build.zig.zon copied
+    ///                                verbatim with only `.dependencies` (rewritten
+    ///                                to the workspace deps) and `.paths` (set to
+    ///                                `.{"."}`) changed. Fingerprint, name, version
+    ///                                and minimum_zig_version are preserved as-is.
     ///   - `dest_dir/{include,lib,bin,share}` — symlinks into the expanded store prefix
+    ///
+    /// `source_zon` is the raw contents of the package's source build.zig.zon.
     pub fn generate(
         self: *BinaryAdapter,
         dest_dir: []const u8,
         expanded_prefix: []const u8,
-        manifest: store.ArtifactManifest,
         dep_realized_paths: source_pkg.DepPathMap,
-        source_fingerprint: ?u64,
+        source_zon: []const u8,
     ) !void {
-        const adapter_name = manifest.instance.package_id.asText();
-
         // Generate and write build.zig (delete any existing symlink to source first).
         const build_zig_abs = try std.Io.Dir.path.join(self.allocator, &.{ dest_dir, "build.zig" });
         defer self.allocator.free(build_zig_abs);
@@ -47,7 +50,7 @@ pub const BinaryAdapter = struct {
         defer self.allocator.free(build_zig_zon_abs);
         std.Io.Dir.cwd().deleteFile(self.io, build_zig_zon_abs) catch {};
 
-        const zon_content = try self.generateBuildZigZon(adapter_name, dep_realized_paths, dest_dir, source_fingerprint);
+        const zon_content = try self.buildAdapterZon(source_zon, dep_realized_paths, dest_dir);
         defer self.allocator.free(zon_content);
         try self.writeFile(dest_dir, "build.zig.zon", zon_content);
 
@@ -207,36 +210,27 @@ pub const BinaryAdapter = struct {
         return try aw.toOwnedSlice();
     }
 
-    /// Generate the build.zig.zon for the binary adapter.
-    fn generateBuildZigZon(
+    /// Build the adapter's build.zig.zon by copying the source package's
+    /// build.zig.zon and rewriting only `.dependencies` (→ the workspace deps that
+    /// expose a library artifact) and `.paths` (→ `.{"."}`, since the adapter dir
+    /// holds a generated build.zig plus store symlinks, not the original source
+    /// tree).  Fingerprint, name, version and minimum_zig_version are preserved
+    /// verbatim — the adapter is the same package identity as its source.
+    fn buildAdapterZon(
         self: *BinaryAdapter,
-        adapter_name: []const u8,
+        source_zon: []const u8,
         dep_realized_paths: source_pkg.DepPathMap,
         dest_dir: []const u8,
-        source_fingerprint: ?u64,
     ) ![]u8 {
         const allocator = self.allocator;
-        var aw: std.Io.Writer.Allocating = .init(allocator);
-        defer aw.deinit();
-        const w = &aw.writer;
 
-        try w.writeAll(".{\n");
-        const bare_name = try packageIdToBareIdent(allocator, adapter_name);
-        defer allocator.free(bare_name);
-        try w.print("    .name = .{s},\n", .{bare_name});
-        try w.writeAll("    .version = \"0.0.0\",\n");
-        if (source_fingerprint) |fp| {
-            try w.print("    .fingerprint = 0x{x:0>16},\n", .{fp});
-        }
-        try w.writeAll("    .paths = .{\".\"},\n");
-        try w.writeAll("    .dependencies = .{\n");
-
-        // Include only deps that have library artifacts.
+        // Adapter deps: only deps that actually expose a library artifact.  Keys and
+        // values are borrowed from dep_realized_paths (valid for this call), so the
+        // map is deinit'd without freeing entries.
+        var adapter_deps = source_pkg.DepPathMap.init(allocator);
+        defer adapter_deps.deinit();
         var dep_it = dep_realized_paths.iterator();
         while (dep_it.next()) |entry| {
-            const alias = entry.key_ptr.*;
-            const dep_path = entry.value_ptr.*;
-
             var dep_libs: std.ArrayList(LibEntry) = .empty;
             defer {
                 for (dep_libs.items) |e| {
@@ -245,18 +239,20 @@ pub const BinaryAdapter = struct {
                 }
                 dep_libs.deinit(allocator);
             }
-            try scanLibDir(allocator, self.io, dep_path, &dep_libs);
+            try scanLibDir(allocator, self.io, entry.value_ptr.*, &dep_libs);
             if (dep_libs.items.len == 0) continue;
-
-            const rel = try relativePath(allocator, dest_dir, dep_path);
-            defer allocator.free(rel);
-            try w.print("        .{s} = .{{ .path = \"{s}\" }},\n", .{ alias, rel });
+            try adapter_deps.put(entry.key_ptr.*, entry.value_ptr.*);
         }
 
-        try w.writeAll("    },\n");
-        try w.writeAll("}\n");
+        var empty = source_pkg.DepPathMap.init(allocator);
+        defer empty.deinit();
+        const deps_field = try source_pkg.emitDependenciesField(allocator, dest_dir, adapter_deps, empty);
+        defer allocator.free(deps_field);
 
-        return try aw.toOwnedSlice();
+        const with_deps = try source_pkg.replaceStructField(allocator, source_zon, ".dependencies", deps_field);
+        defer allocator.free(with_deps);
+
+        return source_pkg.replaceStructField(allocator, with_deps, ".paths", ".paths = .{\".\"},\n");
     }
 
     fn writeFile(self: *BinaryAdapter, dir_path: []const u8, sub_path: []const u8, content: []const u8) !void {
@@ -317,21 +313,6 @@ fn sanitizeAlias(allocator: std.mem.Allocator, alias: []const u8) ![]u8 {
     return result;
 }
 
-/// Convert a package ID (e.g. "diamond.libE") to a valid bare Zig identifier
-/// suitable for the `.name` field in `build.zig.zon` (e.g. "diamond_libe").
-/// Dots → underscores, all lowercase.
-fn packageIdToBareIdent(allocator: std.mem.Allocator, package_id: []const u8) ![]u8 {
-    const result = try allocator.dupe(u8, package_id);
-    for (result) |*c| {
-        if (c.* == '.') {
-            c.* = '_';
-        } else {
-            c.* = std.ascii.toLower(c.*);
-        }
-    }
-    return result;
-}
-
 /// Build a Zig variable name for a module: "mod_" + lowercase(artifact_name).
 fn modVarName(allocator: std.mem.Allocator, artifact_name: []const u8) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(allocator);
@@ -350,52 +331,6 @@ fn libVarName(allocator: std.mem.Allocator, artifact_name: []const u8) ![]u8 {
     try w.writeAll("lib_");
     for (artifact_name) |c| try w.writeByte(std.ascii.toLower(c));
     return try aw.toOwnedSlice();
-}
-
-/// Compute a relative path from `from_dir` to `to_path`.
-/// Both must be absolute. Caller owns the returned slice.
-fn relativePath(allocator: std.mem.Allocator, from_dir: []const u8, to_path: []const u8) ![]u8 {
-    var from_it = std.mem.splitScalar(u8, from_dir, '/');
-    var to_it = std.mem.splitScalar(u8, to_path, '/');
-
-    var from_parts: std.ArrayList([]const u8) = .empty;
-    defer from_parts.deinit(allocator);
-    var to_parts: std.ArrayList([]const u8) = .empty;
-    defer to_parts.deinit(allocator);
-
-    while (from_it.next()) |part| {
-        if (part.len > 0) try from_parts.append(allocator, part);
-    }
-    while (to_it.next()) |part| {
-        if (part.len > 0) try to_parts.append(allocator, part);
-    }
-
-    var common: usize = 0;
-    while (common < from_parts.items.len and common < to_parts.items.len) {
-        if (!std.mem.eql(u8, from_parts.items[common], to_parts.items[common])) break;
-        common += 1;
-    }
-
-    const up_count = from_parts.items.len - common;
-    const remaining = to_parts.items[common..];
-
-    var result: std.ArrayList(u8) = .empty;
-    defer result.deinit(allocator);
-
-    for (0..up_count) |i| {
-        if (i > 0) try result.append(allocator, '/');
-        try result.appendSlice(allocator, "..");
-    }
-    for (remaining) |part| {
-        if (result.items.len > 0) try result.append(allocator, '/');
-        try result.appendSlice(allocator, part);
-    }
-
-    if (result.items.len == 0) {
-        try result.append(allocator, '.');
-    }
-
-    return result.toOwnedSlice(allocator);
 }
 
 test "libArtifactName strips lib prefix and .a suffix" {
@@ -438,21 +373,43 @@ test "libVarName produces lib_lower form" {
     try std.testing.expectEqualStrings("lib_foobar", name2);
 }
 
-test "generateBuildZigZon has no fingerprint and no prefix dep" {
+test "buildAdapterZon copies source fields and rewrites paths" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
 
+    // Source build.zig.zon with a fingerprint, a real version, and source-relative
+    // deps/paths that must NOT survive into the adapter.
+    const source_zon =
+        \\.{
+        \\    .name = .hello_lib,
+        \\    .version = "1.2.3",
+        \\    .fingerprint = 0xa6f32132731a41e2,
+        \\    .minimum_zig_version = "0.16.0",
+        \\    .dependencies = .{
+        \\        .@"zpkg-build" = .{ .path = "../../pkg/zpkg-build" },
+        \\    },
+        \\    .paths = .{ "build.zig", "src", "include" },
+        \\}
+        \\
+    ;
+
     var adapter = BinaryAdapter.init(allocator, io);
+    // No dep dirs on disk → adapter_deps is empty (none expose a .a artifact).
     var empty_deps = source_pkg.DepPathMap.init(allocator);
     defer empty_deps.deinit();
 
-    const zon = try adapter.generateBuildZigZon("zpkg.example.hello_lib", empty_deps, "/fake/dest", null);
+    const zon = try adapter.buildAdapterZon(source_zon, empty_deps, "/fake/dest");
     defer allocator.free(zon);
 
-    try std.testing.expect(std.mem.indexOf(u8, zon, ".name = .zpkg_example_hello_lib") != null);
-    try std.testing.expect(std.mem.indexOf(u8, zon, ".fingerprint") == null);
+    // Identity fields copied verbatim from source.
+    try std.testing.expect(std.mem.indexOf(u8, zon, ".name = .hello_lib") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zon, ".version = \"1.2.3\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zon, ".fingerprint = 0xa6f32132731a41e2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zon, ".minimum_zig_version = \"0.16.0\"") != null);
+    // paths rewritten to `.{"."}`; the source's src/include entries are gone.
+    try std.testing.expect(std.mem.indexOf(u8, zon, ".paths = .{\".\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, zon, "\"src\"") == null);
+    // dependencies rewritten to the (empty) adapter dep set; zpkg-build dropped.
     try std.testing.expect(std.mem.indexOf(u8, zon, ".dependencies = .{") != null);
-    // No prefix dep in new format.
-    try std.testing.expect(std.mem.indexOf(u8, zon, ".prefix") == null);
+    try std.testing.expect(std.mem.indexOf(u8, zon, "zpkg-build") == null);
 }
-// cache bust

@@ -93,22 +93,20 @@ pub const Realizer = struct {
         freeDepMapImpl(self.allocator, map);
     }
 
-    /// Read `.fingerprint` from a source package's build.zig.zon so the binary
-    /// adapter can carry the same package identity.  `source_path` may be absolute
-    /// or relative to `lockfile_dir`.  Returns null on any failure (empty path,
-    /// unreadable file, absent field); the adapter simply omits the field then.
-    pub fn readSourceFingerprint(self: Realizer, source_path: []const u8) ?u64 {
-        if (source_path.len == 0) return null;
-        const src_abs = resolveLockfilePath(self.allocator, self.lockfile_dir, source_path) catch return null;
+    /// Read the raw contents of a package's source build.zig.zon.  `source_path`
+    /// may be absolute or relative to `lockfile_dir`.  Caller owns the result.
+    fn readSourceManifest(self: Realizer, source_path: []const u8) ![]u8 {
+        if (source_path.len == 0) return error.MissingSourcePath;
+        const src_abs = try resolveLockfilePath(self.allocator, self.lockfile_dir, source_path);
         defer self.allocator.free(src_abs);
-        var sr = source_pkg.SourcePkgRealize.init(self.allocator, self.io);
-        const fields = sr.readSourceFields(src_abs) catch return null;
-        defer fields.deinitOwned(self.allocator);
-        return fields.fingerprint;
+        var dir = try std.Io.Dir.openDirAbsolute(self.io, src_abs, .{});
+        defer dir.close(self.io);
+        return dir.readFileAlloc(self.io, "build.zig.zon", self.allocator, .limited(64 * 1024));
     }
 
     /// Materialize a store artifact into `deps/<display_key>/` as a binary adapter:
-    /// symlinks to the expanded prefix plus a generated `build.zig` / `build.zig.zon`.
+    /// symlinks to the expanded prefix plus a generated `build.zig`, and a
+    /// `build.zig.zon` copied from the source package (deps/paths rewritten).
     /// `store_key` is the content-addressed key used to fetch from the store.
     pub fn realizeBinaryAdapter(
         self: Realizer,
@@ -123,16 +121,16 @@ pub const Realizer = struct {
         const expanded = try store.expandArtifact(store_key);
         defer self.allocator.free(expanded);
 
-        const artifact_manifest = try store.loadManifest(store_key);
-        defer artifact_manifest.deinit(self.allocator);
-
         var dep_map = try self.buildDepMap(instance.deps);
         defer self.freeDepMap(&dep_map);
 
-        const source_fp = self.readSourceFingerprint(instance.source_path);
+        // The adapter's build.zig.zon is the source package's build.zig.zon with only
+        // deps/paths rewritten, so the package keeps its fingerprint and identity.
+        const source_zon = try self.readSourceManifest(instance.source_path);
+        defer self.allocator.free(source_zon);
 
         var adapter = binary_adapter.BinaryAdapter.init(self.allocator, self.io);
-        try adapter.generate(dest_dir, expanded, artifact_manifest, dep_map, source_fp);
+        try adapter.generate(dest_dir, expanded, dep_map, source_zon);
     }
 
     /// Materialize a source package into `deps/<display_key>/` (symlink forest plus a

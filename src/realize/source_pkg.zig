@@ -112,85 +112,6 @@ pub const SourcePkgRealize = struct {
         try dir.writeFile(self.io, .{ .sub_path = sub_path, .data = content });
     }
 
-    pub const SourceFields = struct {
-        name: []const u8,
-        fingerprint: ?u64,
-        version: []const u8,
-        minimum_zig_version: ?[]const u8,
-        paths: [][]const u8,
-
-        pub fn deinitOwned(self: SourceFields, allocator: std.mem.Allocator) void {
-            allocator.free(self.name);
-            allocator.free(self.version);
-            if (self.minimum_zig_version) |v| allocator.free(v);
-            for (self.paths) |p| allocator.free(p);
-            allocator.free(self.paths);
-        }
-    };
-
-    /// Read all static fields from the source build.zig.zon that must be copied
-    /// verbatim into the workspace file.  Caller owns all slice fields (use
-    /// `SourceFields.deinitOwned` to free).
-    pub fn readSourceFields(self: *SourcePkgRealize, source_dir: []const u8) !SourceFields {
-        const src_dir = try std.Io.Dir.openDirAbsolute(self.io, source_dir, .{});
-        defer src_dir.close(self.io);
-        const content = try src_dir.readFileAlloc(self.io, "build.zig.zon", self.allocator, .limited(64 * 1024));
-        defer self.allocator.free(content);
-        const sentinel = try self.allocator.dupeZ(u8, content);
-        defer self.allocator.free(sentinel);
-
-        var doc = try zon_util.parseDocument(self.allocator, sentinel);
-        defer doc.deinit(self.allocator);
-        const root = try zon_util.Object.fromNode(&doc, .root);
-
-        // .name may be an enum literal (.my_pkg) or a quoted string ("my_pkg").
-        const name_node = try root.require("name");
-        const name = zon_util.parseEnumLiteralAlloc(self.allocator, &doc, name_node) catch blk: {
-            // Fall back to string: re-wrap decoded bytes in quotes.
-            const inner = try zon_util.parseNonEmptyStringAlloc(self.allocator, &doc, name_node);
-            defer self.allocator.free(inner);
-            break :blk try std.fmt.allocPrint(self.allocator, "\"{s}\"", .{inner});
-        };
-        errdefer self.allocator.free(name);
-
-        const version_node = try root.require("version");
-        const version = blk: {
-            const inner = try zon_util.parseNonEmptyStringAlloc(self.allocator, &doc, version_node);
-            defer self.allocator.free(inner);
-            break :blk try std.fmt.allocPrint(self.allocator, "\"{s}\"", .{inner});
-        };
-        errdefer self.allocator.free(version);
-
-        const minimum_zig_version: ?[]const u8 = if (root.get("minimum_zig_version")) |n| blk: {
-            const inner = try zon_util.parseNonEmptyStringAlloc(self.allocator, &doc, n);
-            defer self.allocator.free(inner);
-            break :blk try std.fmt.allocPrint(self.allocator, "\"{s}\"", .{inner});
-        } else null;
-        errdefer if (minimum_zig_version) |v| self.allocator.free(v);
-
-        const fingerprint: ?u64 = if (root.get("fingerprint")) |n| blk: {
-            break :blk try zon_util.parseUint(&doc, n);
-        } else null;
-
-        const paths_node = try root.require("paths");
-        const paths_arr = try zon_util.Array.fromNode(&doc, paths_node);
-        const paths = try self.allocator.alloc([]const u8, paths_arr.len());
-        errdefer self.allocator.free(paths);
-        var paths_filled: usize = 0;
-        errdefer for (paths[0..paths_filled]) |p| self.allocator.free(p);
-        for (0..paths_arr.len()) |i| {
-            paths[i] = try zon_util.parseNonEmptyStringAlloc(self.allocator, &doc, paths_arr.at(i));
-            paths_filled += 1;
-        }
-
-        return .{
-            .name = name,
-            .fingerprint = fingerprint,
-            .version = version,
-            .minimum_zig_version = minimum_zig_version,
-            .paths = paths,
-        };
-    }
 
     /// Parse the source build.zig.zon and return a map of dep_name → absolute_path
     /// for dependencies NOT already present in `resolved_deps`.  These are build-tool
@@ -261,73 +182,87 @@ pub const SourcePkgRealize = struct {
         dep_realized_paths: DepPathMap,
         extra_deps: DepPathMap,
     ) ![]u8 {
-        const new_deps = try self.buildDepsSection(dest_dir, dep_realized_paths, extra_deps);
+        const new_deps = try emitDependenciesField(self.allocator, dest_dir, dep_realized_paths, extra_deps);
         defer self.allocator.free(new_deps);
-
-        var aw: std.Io.Writer.Allocating = .init(self.allocator);
-        defer aw.deinit();
-        const w = &aw.writer;
-
-        if (findDepsFieldSpan(source_content)) |span| {
-            try w.writeAll(source_content[0..span.start]);
-            try w.writeAll(new_deps);
-            try w.writeAll(source_content[span.end..]);
-        } else {
-            // No .dependencies field: insert before the final `}`
-            if (std.mem.lastIndexOfScalar(u8, source_content, '}')) |last_brace| {
-                try w.writeAll(source_content[0..last_brace]);
-                try w.writeAll("    ");
-                try w.writeAll(new_deps);
-                try w.writeByte('\n');
-                try w.writeAll(source_content[last_brace..]);
-            } else {
-                return self.allocator.dupe(u8, source_content);
-            }
-        }
-
-        return try aw.toOwnedSlice();
-    }
-
-    /// Generate the `.dependencies = .{...},\n` replacement block.
-    fn buildDepsSection(
-        self: *SourcePkgRealize,
-        dest_dir: []const u8,
-        dep_realized_paths: DepPathMap,
-        extra_deps: DepPathMap,
-    ) ![]u8 {
-        var aw: std.Io.Writer.Allocating = .init(self.allocator);
-        defer aw.deinit();
-        const w = &aw.writer;
-
-        try w.writeAll(".dependencies = .{\n");
-
-        var keys: std.ArrayList([]const u8) = .empty;
-        defer keys.deinit(self.allocator);
-        var it1 = dep_realized_paths.keyIterator();
-        while (it1.next()) |k| try keys.append(self.allocator, k.*);
-        var it2 = extra_deps.keyIterator();
-        while (it2.next()) |k| try keys.append(self.allocator, k.*);
-        std.mem.sort([]const u8, keys.items, {}, struct {
-            fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-                return std.mem.order(u8, a, b) == .lt;
-            }
-        }.lessThan);
-
-        for (keys.items) |key| {
-            const abs_path = dep_realized_paths.get(key) orelse extra_deps.get(key).?;
-            const rel_path = try relativePath(self.allocator, dest_dir, abs_path);
-            defer self.allocator.free(rel_path);
-            if (isBareIdentifier(key)) {
-                try w.print("        .{s} = .{{ .path = \"{s}\" }},\n", .{ key, rel_path });
-            } else {
-                try w.print("        .@\"{s}\" = .{{ .path = \"{s}\" }},\n", .{ key, rel_path });
-            }
-        }
-
-        try w.writeAll("    },\n");
-        return try aw.toOwnedSlice();
+        return replaceStructField(self.allocator, source_content, ".dependencies", new_deps);
     }
 };
+
+/// Emit a `.dependencies = .{ ... },\n` field body from a dep-path map.  Keys from
+/// both maps are merged, sorted for determinism, and bare-identifier-quoted as
+/// needed; each dep path is emitted relative to `dest_dir`.  Caller owns the result.
+pub fn emitDependenciesField(
+    allocator: std.mem.Allocator,
+    dest_dir: []const u8,
+    dep_realized_paths: DepPathMap,
+    extra_deps: DepPathMap,
+) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    const w = &aw.writer;
+
+    try w.writeAll(".dependencies = .{\n");
+
+    var keys: std.ArrayList([]const u8) = .empty;
+    defer keys.deinit(allocator);
+    var it1 = dep_realized_paths.keyIterator();
+    while (it1.next()) |k| try keys.append(allocator, k.*);
+    var it2 = extra_deps.keyIterator();
+    while (it2.next()) |k| try keys.append(allocator, k.*);
+    std.mem.sort([]const u8, keys.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lessThan);
+
+    for (keys.items) |key| {
+        const abs_path = dep_realized_paths.get(key) orelse extra_deps.get(key).?;
+        const rel_path = try relativePath(allocator, dest_dir, abs_path);
+        defer allocator.free(rel_path);
+        if (isBareIdentifier(key)) {
+            try w.print("        .{s} = .{{ .path = \"{s}\" }},\n", .{ key, rel_path });
+        } else {
+            try w.print("        .@\"{s}\" = .{{ .path = \"{s}\" }},\n", .{ key, rel_path });
+        }
+    }
+
+    try w.writeAll("    },\n");
+    return try aw.toOwnedSlice();
+}
+
+/// Copy `source` verbatim, replacing the top-level struct-literal field named by
+/// `field_selector` (e.g. ".dependencies", ".paths") with `new_field` (the full
+/// `.name = .{...},\n` text).  If the field is absent it is inserted before the
+/// closing `}`.  Caller owns the result.
+pub fn replaceStructField(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    field_selector: []const u8,
+    new_field: []const u8,
+) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    const w = &aw.writer;
+
+    if (findFieldSpan(source, field_selector)) |span| {
+        try w.writeAll(source[0..span.start]);
+        try w.writeAll(new_field);
+        try w.writeAll(source[span.end..]);
+    } else {
+        // Field absent: insert before the final `}`.
+        if (std.mem.lastIndexOfScalar(u8, source, '}')) |last_brace| {
+            try w.writeAll(source[0..last_brace]);
+            try w.writeAll("    ");
+            try w.writeAll(new_field);
+            try w.writeByte('\n');
+            try w.writeAll(source[last_brace..]);
+        } else {
+            return allocator.dupe(u8, source);
+        }
+    }
+
+    return try aw.toOwnedSlice();
+}
 
 /// Returns true if `name` is a valid Zig bare identifier (no quoting needed).
 /// Rejects empty strings, names starting with digits, names containing
@@ -409,19 +344,19 @@ fn relativePath(allocator: std.mem.Allocator, from_dir: []const u8, to_path: []c
     return result.toOwnedSlice(allocator);
 }
 
-/// Locate the `.dependencies = .{...},` field in a ZON source string and return
-/// its byte span [start, end).  `start` is the position of the `.` that begins
-/// `.dependencies`; `end` is just past the `\n` that follows the closing `,`.
+/// Locate a top-level struct-literal field (e.g. ".dependencies" or ".paths") in
+/// a ZON source string and return its byte span [start, end).  `start` is the
+/// position of the leading `.`; `end` is just past the `\n` that follows the
+/// closing `,`.  Only matches fields whose value is a struct literal (`.{...}`).
 ///
 /// Returns null if the field is absent or the source is malformed.
-fn findDepsFieldSpan(source: []const u8) ?struct { start: usize, end: usize } {
-    const dep_name = ".dependencies";
+fn findFieldSpan(source: []const u8, field_selector: []const u8) ?struct { start: usize, end: usize } {
     var search: usize = 0;
     while (search < source.len) {
-        const idx = std.mem.indexOfPos(u8, source, search, dep_name) orelse return null;
+        const idx = std.mem.indexOfPos(u8, source, search, field_selector) orelse return null;
 
-        // The first non-whitespace character after `.dependencies` must be `=`.
-        var pos = idx + dep_name.len;
+        // The first non-whitespace character after the field name must be `=`.
+        var pos = idx + field_selector.len;
         while (pos < source.len and (source[pos] == ' ' or source[pos] == '\t')) : (pos += 1) {}
         if (pos >= source.len or source[pos] != '=') {
             search = idx + 1;
@@ -651,36 +586,6 @@ fn cleanupTmpDir(io: std.Io, tmp_path: []const u8) void {
     // sub_path relative to /tmp
     const base = std.fs.path.basename(tmp_path);
     parent.deleteTree(io, base) catch {};
-}
-
-test "readSourceFields handles field order: paths before name" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
-
-    const zon =
-        \\.{
-        \\    .paths = .{ "build.zig", "src" },
-        \\    .fingerprint = 0x0000000000000001,
-        \\    .name = .my_pkg,
-        \\    .version = "0.1.0",
-        \\}
-    ;
-    const tmp_path = try withTmpZon(io, "zpkg_test_rsf_order", zon);
-    defer {
-        cleanupTmpDir(io, tmp_path);
-        allocator.free(tmp_path);
-    }
-
-    var realizer = SourcePkgRealize.init(allocator, io);
-    var fields = try realizer.readSourceFields(tmp_path);
-    defer fields.deinitOwned(allocator);
-
-    try std.testing.expectEqualStrings(".my_pkg", fields.name);
-    try std.testing.expectEqualStrings("\"0.1.0\"", fields.version);
-    try std.testing.expectEqual(@as(?u64, 1), fields.fingerprint);
-    try std.testing.expectEqual(@as(usize, 2), fields.paths.len);
-    try std.testing.expectEqualStrings("build.zig", fields.paths[0]);
-    try std.testing.expectEqualStrings("src", fields.paths[1]);
 }
 
 test "readExtraDepsFromSource skips URL deps" {
