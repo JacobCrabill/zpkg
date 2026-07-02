@@ -60,6 +60,16 @@ pub const Version = struct {
         return self.cmp(other) == .eq;
     }
 
+    /// Compare on the `major.minor.patch` triple only, ignoring `revision`.
+    /// Version ranges operate at this granularity — the 4th digit is a
+    /// release-tweak pin honored only by exact `=x.y.z.t` requirements.
+    pub fn cmp3(self: Version, other: Version) std.math.Order {
+        if (self.major != other.major) return if (self.major < other.major) .lt else .gt;
+        if (self.minor != other.minor) return if (self.minor < other.minor) .lt else .gt;
+        if (self.patch != other.patch) return if (self.patch < other.patch) .lt else .gt;
+        return .eq;
+    }
+
     pub fn bufPrint(self: Version, buf: []u8) ![]u8 {
         return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{ self.major, self.minor, self.patch, self.revision });
     }

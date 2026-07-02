@@ -52,6 +52,11 @@
 #                                 creates one, then proceeds; the regenerated
 #                                 lockfile is deterministic (identical store keys
 #                                 → all hits), i.e. equivalent to `zpkg lock`.
+#  10. Version-range enforcement  A dependency requiring an unsatisfiable range of
+#                                 a real lib fails resolution with a clear message
+#                                 and writes no lockfile; a satisfiable range
+#                                 (revision ignored) resolves. Proves ranges are
+#                                 enforced (previously dead metadata).
 #
 # NOT COVERED (intentionally out of scope for this test):
 #   - Cross-compilation targets (--target): only native profiles are built here;
@@ -221,6 +226,56 @@ assert_contains "$auto_out" "No lockfile found" "build reports the missing lockf
 assert_file "$APP/zpkg.lock.zon" "lockfile recreated by build"
 assert_contains "$auto_out" "5 instances (5 store hits, 0 to build)" \
     "auto-generated lockfile matches the original (identical store keys → all hits)"
+echo
+
+# --- 10. Version ranges: enforcement + conflict detection ---------------------
+# A self-contained fixture (root + a local libA @ 0.1.0.0) where the root requires
+# an unsatisfiable range must fail resolution with a clear message and write no
+# lockfile; a satisfiable range (revision ignored) must succeed. Proves ranges are
+# enforced (previously dead metadata) and compare on x.y.z.
+echo "${BOLD}[10] version-range enforcement${RESET}"
+vr_dir="$(mktemp -d)"
+mkdir -p "$vr_dir/libA"
+cat > "$vr_dir/libA/zpkg.zon" <<'EOF'
+.{
+    .schema = 1,
+    .package = .{ .name = "liba", .id = "test.liba", .version = "0.1.0.0", .backend = .zig },
+    .targets = .{ .liba = .{ .kind = .library, .linkage = .static } },
+}
+EOF
+# libA also needs a build.zig.zon: `zpkg lock` hashes each dependency's source.
+cat > "$vr_dir/libA/build.zig.zon" <<'EOF'
+.{
+    .name = .test_liba,
+    .version = "0.1.0",
+    .fingerprint = 0x1234567890abcdef,
+    .paths = .{ "build.zig.zon", "zpkg.zon" },
+}
+EOF
+write_vr() { # $1 = require string; libA is a relative sub-package
+    cat > "$vr_dir/zpkg.zon" <<EOF
+.{
+    .schema = 1,
+    .package = .{ .name = "vrtest", .id = "test.vrtest", .version = "0.1.0.0", .backend = .zig },
+    .deps = .{
+        .libA = .{ .package = "test.liba", .require = .{ .version = "$1" }, .source_path = "libA" },
+    },
+    .targets = .{ .vrtest = .{ .kind = .executable } },
+}
+EOF
+    rm -f "$vr_dir/zpkg.lock.zon"
+}
+
+write_vr "^0.2.0"  # needs 0.2.x; libA is 0.1.0.0 → conflict
+vr_bad="$("$ZPKG_BIN" lock "$vr_dir" 2>&1 || true)"
+assert_contains "$vr_bad" "requires >=0.2.0, <0.3.0" "unsatisfied range reports the normalized requirement"
+assert_contains "$vr_bad" "resolves to 0.1.0.0" "unsatisfied range reports the resolved version"
+if [[ ! -f "$vr_dir/zpkg.lock.zon" ]]; then ok "no lockfile written on conflict"; else bad "lockfile written despite conflict"; fi
+
+write_vr "^0.1.0"  # 0.1.0.0 satisfies ^0.1 (revision ignored)
+"$ZPKG_BIN" lock "$vr_dir" >/dev/null 2>&1 || true
+assert_file "$vr_dir/zpkg.lock.zon" "satisfiable range resolves and writes a lockfile"
+rm -rf "$vr_dir"
 echo
 
 # --- Summary ------------------------------------------------------------------

@@ -80,7 +80,7 @@ fn parseErrorIssue(err: ParseError) []const u8 {
         error.MissingPackageVersion => "missing required .package.version string",
         error.MissingPackageBackend => "missing required .package.backend enum",
         error.MissingDependencyPackageId => "each .deps.<alias> entry must declare .package = \"<canonical package id>\"",
-        error.MissingDependencyVersionRequirement => "each .deps.<alias>.require entry must declare .version = \"=<version>\"",
+        error.MissingDependencyVersionRequirement => "each .deps.<alias>.require entry must declare .version = \"<range>\" (e.g. \"=1.2.3\", \"^1.2.3\", \">=1.2, <2.0\")",
         error.UnknownTopLevelField => "unknown top-level field",
         error.UnknownPackageField => "unknown field inside .package",
         error.UnknownOptionField => "unknown field inside .options.<name>",
@@ -128,12 +128,12 @@ fn parseErrorHelp(err: ParseError) []const u8 {
         error.MissingPackageVersion => "add .package.version = \"1.2.3\" or \"1.2.3.0\"",
         error.MissingPackageBackend => "add .package.backend = .zig",
         error.MissingDependencyPackageId => "for each dependency alias, add .package = \"namespace.package_name\"",
-        error.MissingDependencyVersionRequirement, error.MalformedVersionConstraint => "for each dependency alias, use .require = .{ .version = \"=<version>\" } in Phase 01",
+        error.MissingDependencyVersionRequirement, error.MalformedVersionConstraint => "use .require = .{ .version = \"<range>\" } — operators = >= <= > < ^ ~ * and comma-AND (e.g. \"^1.2.3\", \">=1.2, <2.0\")",
         error.UnknownTopLevelField => "allowed top-level fields are .schema, .package, .options, .deps, and .targets",
         error.UnknownPackageField => "allowed .package fields are .name, .id, .version, and .backend",
         error.UnknownOptionField => "allowed .options.<name> fields are .kind, .default, and .abi",
         error.UnknownDependencyField => "allowed .deps.<alias> fields are .package, .require, .when, and .source_path",
-        error.UnknownRequirementField => "allowed .deps.<alias>.require fields are only .version in Phase 01",
+        error.UnknownRequirementField => "the only allowed .deps.<alias>.require field is .version",
         error.UnknownTargetField => "allowed .targets.<name> fields are .kind, .linkage, .test_only, and .when",
         error.UnknownConditionField => "allowed .when fields are .domain, .host_os, .host_arch, .target_os, .target_arch, and .options",
         error.UnknownOptionKind => "use one of .bool, .int, or .string",
@@ -247,10 +247,8 @@ fn writeNormalizedWithAllocator(writer: *std.Io.Writer, allocator: std.mem.Alloc
             try writeString(writer, dep.package.text);
             try writer.writeAll(",\n");
             try writer.writeAll("            .require = .{ .version = ");
-            var dep_version_buf: [32]u8 = undefined;
-            const dep_version_text = try dep.require.exact.bufPrint(&dep_version_buf);
             var req_buf: [64]u8 = undefined;
-            const req_text = try std.fmt.bufPrint(&req_buf, "={s}", .{dep_version_text});
+            const req_text = try dep.require.bufPrint(&req_buf);
             try writeString(writer, req_text);
             try writer.writeAll(" },\n");
             if (dep.when) |condition| {
@@ -1135,7 +1133,7 @@ test "reject malformed versions malformed version constraints invalid package id
         \\.{
         \\    .schema = 1,
         \\    .package = .{ .name = "x", .id = "zpkg.example.x", .version = "1.2.3", .backend = .zig },
-        \\    .deps = .{ .foo = .{ .package = "zpkg.example.foo", .require = .{ .version = "^1.2.3" } } },
+        \\    .deps = .{ .foo = .{ .package = "zpkg.example.foo", .require = .{ .version = "1.2" } } },
         \\    .targets = .{ .x = .{ .kind = .executable } },
         \\}
     , error.MalformedVersionConstraint);

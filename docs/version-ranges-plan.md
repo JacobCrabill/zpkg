@@ -1,6 +1,8 @@
 # Plan: Version-Range Support on Dependencies
 
-_Status: proposed._
+_Status: Phase 1 implemented (grammar + `satisfies` + resolver enforcement +
+conflict detection); Phase 2 (selection) designed and deferred pending a
+multi-version package source._
 
 ## Current state (facts)
 
@@ -169,13 +171,20 @@ itself, but it's what makes selection matter at scale. Out of scope here.
   possibly recording the per-instance source origin, which path deps already do via
   `source_path`).
 
-## Decisions to confirm
-1. **Operator set** — adopt `= >= <= > < ^ ~ *` + comma-AND? (Recommended.)
-2. **Caret 0.x semantics** — adopt Cargo's `^0.2.3 ⇒ <0.3.0`, `^0.0.3 ⇒ <0.0.4`,
-   with the 4th `revision` component ordering-only (no compat axis)? (Recommended.)
-3. **Phase 2 selection** — newest-compatible (Cargo) vs MVS (Go)? (Recommend
-   newest-compatible, computed at lock time.)
-4. **Side-by-side majors** — confirm deferring (keep one version per package id).
+## Confirmed decisions
+1. **Operator set** — `= >= <= > < ^ ~ *` + comma-AND. ✅
+2. **Revision (4th digit) semantics** — the revision is a *release-tweak* pin, not a
+   normal version axis. Therefore:
+   - **Range operators compare on `x.y.z` only; the revision is ignored.** e.g.
+     `^0.2.3` matches `0.2.3.0` and `0.2.3.5` alike (both are "0.2.3").
+   - **Only an exact `=x.y.z.t` requirement honors the 4th digit** (full 4-component
+     equality). `=x.y.z` normalizes to `=x.y.z.0` and matches the canonical release.
+   - Caret 0.x follows Cargo on the `x.y.z` axis: `^0.2.3 ⇒ >=0.2.3, <0.3.0`,
+     `^0.0.3 ⇒ >=0.0.3, <0.0.4`.
+   - (Phase-2 selection detail: the candidate pool is `x.y.z.0` releases; a `.t`
+     tweak only enters consideration when explicitly pinned `=x.y.z.t`.)
+3. **Phase 2 selection** — newest-compatible (Cargo-style), computed at lock time. ✅
+4. **Side-by-side majors** — deferred; keep one version per package id. ✅
 
 ## Suggested landing order
 Phase 1 lands as one self-contained change (grammar + model + schema + resolver

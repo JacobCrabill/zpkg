@@ -14,6 +14,7 @@ pub const ResolverError = error{
     OptionTypeMismatch,
     DependencyManifestNotFound,
     MissingSourcePath,
+    UnsatisfiedRequirement,
 };
 
 pub const Resolver = struct {
@@ -158,12 +159,9 @@ pub const Resolver = struct {
     fn resolveManifests(self: *Resolver, pkg: PackageContext) ![]const model.PackageManifest {
         const manifests = try self.allocator.alloc(model.PackageManifest, pkg.manifest.deps.len);
         var i: usize = 0;
-        errdefer {
-            for (manifests[0..i]) |*manifest| {
-                manifest.deinitOwned(self.allocator);
-            }
-            self.allocator.free(manifests);
-        }
+        // Elements alias package_cache entries (cache-owned) — only the slice is
+        // freed here; deinit'ing the elements would double-free with the cache.
+        errdefer self.allocator.free(manifests);
 
         // Look up the current package's source directory.
         // Keys are always "#target" since source_path is a single path regardless of domain.
@@ -181,24 +179,28 @@ pub const Resolver = struct {
                 }
             }
 
-            // Look up the manifest in cache first.
+            // Obtain the dependency manifest (cache hit, or parse+cache on miss).
             // cache_key ownership: freed on cache hit; transferred to map on miss.
             const cache_key = try std.fmt.allocPrint(self.allocator, "{s}#{s}", .{ dep.package.asText(), pkg.domain.asText() });
+            const dep_manifest: model.PackageManifest = blk: {
+                if (self.package_cache.get(cache_key)) |cached_manifest| {
+                    self.allocator.free(cache_key); // we own it, not inserted
+                    break :blk cached_manifest.*;
+                }
+                var parsed = try self.parseDependencyManifest(dep, current_source_dir);
+                errdefer parsed.deinitOwned(self.allocator);
+                errdefer self.allocator.free(cache_key);
+                try self.package_cache.put(cache_key, parsed); // cache takes ownership
+                break :blk parsed;
+            };
 
-            if (self.package_cache.get(cache_key)) |cached_manifest| {
-                self.allocator.free(cache_key); // we own it, not inserted
-                manifests[i] = cached_manifest.*;
-                i += 1;
-                continue;
+            // Enforce the declared version requirement against the resolved version.
+            // A package resolves to a single version, so a second dependent whose
+            // requirement disagrees with that version surfaces here as a conflict.
+            if (!dep.require.satisfies(dep_manifest.package.version)) {
+                reportUnsatisfied(dep, dep_manifest.package.version);
+                return error.UnsatisfiedRequirement;
             }
-
-            // Parse the dependency manifest using the explicit source_path.
-            var dep_manifest = try self.parseDependencyManifest(dep, current_source_dir);
-            errdefer dep_manifest.deinitOwned(self.allocator);
-            errdefer self.allocator.free(cache_key);
-
-            // Cache takes ownership of both cache_key and dep_manifest.
-            try self.package_cache.put(cache_key, dep_manifest);
 
             manifests[i] = dep_manifest;
             i += 1;
@@ -427,6 +429,19 @@ fn formatInstanceKey(allocator: std.mem.Allocator, package_id: model.PackageId, 
     );
 }
 
+/// Log a version-requirement failure. Because a package resolves to one version,
+/// this also reports diamond conflicts (the second dependent whose range the
+/// shared version doesn't satisfy).
+fn reportUnsatisfied(dep: model.Dependency, resolved: model.Version) void {
+    var rbuf: [64]u8 = undefined;
+    var vbuf: [32]u8 = undefined;
+    const rtext = dep.require.bufPrint(&rbuf) catch "?";
+    const vtext = resolved.bufPrint(&vbuf) catch "?";
+    std.log.err("zpkg: dependency '{s}' requires {s}, but '{s}' resolves to {s}", .{
+        dep.alias, rtext, dep.package.asText(), vtext,
+    });
+}
+
 test "resolver initializes correctly" {
     const allocator = std.testing.allocator;
     var resolver = Resolver.init(allocator, .linux, .x86_64, .linux, .x86_64, &.{}, ".", std.testing.io);
@@ -456,3 +471,7 @@ test "resolver resolves empty package" {
     const resolved = try resolver.resolveRoot(manifest);
     try std.testing.expectEqualStrings("test.example.test", resolved.package_id.asText());
 }
+
+// Requirement *satisfaction* is unit-tested in model/package.zig; the resolver's
+// enforcement (which logs via std.log.err and would trip the test runner's
+// error-log check) is covered out-of-process by the diamond integration test.
