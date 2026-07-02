@@ -5,6 +5,7 @@ const build_fallback = @import("../realize/build_fallback.zig");
 const store_mod = @import("../store/store.zig");
 const toolchain_fingerprint_mod = @import("../hash/toolchain_fingerprint.zig");
 const diag = @import("../util/diag.zig");
+const status_mod = @import("../util/status.zig");
 
 pub const help_text =
     \\zpkg build — Build all instances from the lockfile
@@ -21,6 +22,8 @@ pub const help_text =
     \\  --strict-lockfile       Treat source drift as a hard error (default: warn and rebuild)
     \\  --release[=safe|fast|small]  Optimized build (bare --release = ReleaseFast; default is Debug)
     \\  --target <triple>       Cross-compile for a Zig target triple (default: native)
+    \\  --progress auto|plain|live   Status display: live (refreshing) on a TTY, plain lines
+    \\                          otherwise; 'auto' (default) picks based on the terminal
     \\
     \\Example:
     \\  zpkg build .
@@ -35,6 +38,7 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     var max_jobs: ?usize = null;
     var strict_lockfile = false;
     var profile: realize.Profile = .{};
+    var progress_mode: status_mod.Mode = .auto;
 
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
@@ -60,6 +64,8 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
                 return error.InvalidArgument;
             }
             max_jobs = n;
+        } else if (try tryParseProgressFlag(args, &i, &progress_mode, io)) {
+            // handled
         } else if (try tryParseProfileFlag(args, &i, &profile, io)) {
             // handled (index advanced by the helper if it consumed a value)
         } else if (pkg_root == null) {
@@ -78,7 +84,40 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
 
     const mode: build_fallback.BuildMode = if (with_tests) .build_with_tests else .build;
 
-    try runBuild(root, mode, io, max_jobs, strict_lockfile, profile);
+    try runBuild(root, mode, io, max_jobs, strict_lockfile, profile, progress_mode);
+}
+
+/// If `args[i.*]` is `--progress[=]<mode>` (auto|plain|live), set `progress_mode`
+/// and return true; false if not a progress flag; error if malformed. Shared by
+/// `build` and `test`.
+pub fn tryParseProgressFlag(
+    args: []const []const u8,
+    i: *usize,
+    progress_mode: *status_mod.Mode,
+    io: std.Io,
+) !bool {
+    const arg = args[i.*];
+    if (std.mem.eql(u8, arg, "--progress")) {
+        i.* += 1;
+        if (i.* >= args.len) {
+            try writeStderr(io, "error: --progress requires auto|plain|live\n");
+            return error.InvalidArgument;
+        }
+        progress_mode.* = try parseProgressMode(args[i.*], io);
+    } else if (std.mem.startsWith(u8, arg, "--progress=")) {
+        progress_mode.* = try parseProgressMode(arg["--progress=".len..], io);
+    } else {
+        return false;
+    }
+    return true;
+}
+
+fn parseProgressMode(text: []const u8, io: std.Io) !status_mod.Mode {
+    if (std.mem.eql(u8, text, "auto")) return .auto;
+    if (std.mem.eql(u8, text, "plain")) return .plain;
+    if (std.mem.eql(u8, text, "live")) return .live;
+    try writeStderrFmt(io, "error: --progress must be auto|plain|live, got '{s}'\n", .{text});
+    return error.InvalidArgument;
 }
 
 /// If `args[i.*]` is a build-profile flag (`--release[=…]`, `--target …`), apply
@@ -135,6 +174,7 @@ pub fn runBuild(
     max_jobs_override: ?usize,
     strict_lockfile: bool,
     profile: realize.Profile,
+    progress_mode: status_mod.Mode,
 ) !void {
     // Running foreign-target test binaries needs an emulator/runner; out of scope.
     if (mode == .run_tests and profile.target != null) {
@@ -229,15 +269,23 @@ pub fn runBuild(
     // Resolve max_jobs: explicit flag > CPU count > fallback of 4.
     const max_jobs = max_jobs_override orelse (std.Thread.getCpuCount() catch 4);
 
+    // Live status reporter for child builds (the misses + the root build).
+    var status = status_mod.Status.init(allocator, io, "building", plan.store_misses.count() + 1, progress_mode);
+    defer status.deinit();
+    defer status.stop(); // safety on error paths; stop() is idempotent
+    status.start();
+
     // Execute plan.
-    var executor = build_fallback.BuildExecutor.init(allocator, io, &store, &layout, abs_root, abs_root, max_jobs, strict_lockfile, profile);
+    var executor = build_fallback.BuildExecutor.init(allocator, io, &store, &layout, abs_root, abs_root, max_jobs, strict_lockfile, profile, &status);
     defer executor.deinit();
 
     try executor.execute(plan, lockfile);
 
     // Build the root package.
-    try buildRoot(allocator, io, abs_root, manifest, lockfile, &layout, mode, profile);
+    try buildRoot(allocator, io, abs_root, manifest, lockfile, &layout, mode, profile, &status);
 
+    // Stop the live line before the final summary so it prints on a clean row.
+    status.stop();
     try stdout.print(
         "Build complete. Profile: {s}\n",
         .{profile_slug},
@@ -254,7 +302,10 @@ fn buildRoot(
     layout: *realize.WorkspaceLayout,
     mode: build_fallback.BuildMode,
     profile: realize.Profile,
+    status: *status_mod.Status,
 ) !void {
+    const root_name = manifest.package.id.asText();
+
     const root_dir = try layout.rootPkgDir(allocator);
     defer allocator.free(root_dir);
 
@@ -270,7 +321,7 @@ fn buildRoot(
     defer r.freeDepMap(&root_dep_map);
 
     r.writeSourceRealization(pkg_root, root_dir, root_dep_map) catch |err| {
-        try writeStderrFmt(io, "error: failed to realize root package: {s}\n", .{@errorName(err)});
+        status.log("error: failed to realize root package: {s}", .{@errorName(err)});
         return error.RealizeFailed;
     };
 
@@ -287,11 +338,7 @@ fn buildRoot(
     try argv_list.appendSlice(allocator, build_flags);
     const argv = argv_list.items;
 
-    var stdout_buf: [4096]u8 = undefined;
-    var stdout_file: std.Io.File.Writer = .init(.stdout(), io, &stdout_buf);
-    const stdout = &stdout_file.interface;
-    try stdout.print("[build] {s} (root)\n", .{manifest.package.id.asText()});
-    try stdout.flush();
+    status.begin(root_name);
 
     // Cap dir for the root build: use root_dir itself (it already exists and is
     // unique per workspace profile).
@@ -307,21 +354,20 @@ fn buildRoot(
         switch (result.term) {
             .exited => |code| {
                 if (code != 0) {
-                    try writeStderrFmt(io, "{s}", .{result.stderr});
-                    try writeStderrFmt(io, "error: build failed for root package (exit code {d})\n", .{code});
+                    status.logRaw(result.stderr);
+                    status.fail(root_name, "build failed");
                     return error.BuildFailed;
                 }
             },
             else => {
-                try writeStderrFmt(io, "{s}", .{result.stderr});
-                try writeStderrFmt(io, "error: build process for root package terminated abnormally\n", .{});
+                status.logRaw(result.stderr);
+                status.fail(root_name, "build failed");
                 return error.BuildFailed;
             },
         }
     }
 
-    try stdout.print("[done]  {s} (root)\n", .{manifest.package.id.asText()});
-    try stdout.flush();
+    status.succeed(root_name, "(root)");
 
     // Symlink <pkg_root>/zig-out → <root_dir>/zig-out for easy access.
     const zig_out_target = try std.Io.Dir.path.join(allocator, &.{ root_dir, "zig-out" });

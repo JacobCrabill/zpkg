@@ -4,11 +4,11 @@ const store_mod = @import("../store/store.zig");
 const realize = @import("root.zig");
 const realizer_mod = @import("realizer.zig");
 const profile_mod = @import("profile.zig");
+const status_mod = @import("../util/status.zig");
 const manifest_mod = @import("../store/manifest.zig");
 const instance_key_mod = @import("../hash/instance_key.zig");
 const toolchain_fingerprint_mod = @import("../hash/toolchain_fingerprint.zig");
 const source_hash_mod = @import("../hash/source_hash.zig");
-const diag = @import("../util/diag.zig");
 
 pub const BuildMode = enum { build, build_with_tests, run_tests };
 
@@ -361,46 +361,27 @@ const WorkerCtx = struct {
     store_key: []const u8,
     lockfile: model.Lockfile,
     mode: BuildMode,
-    stdout_mutex: *std.Io.Mutex,
     failed: *std.atomic.Value(bool),
     test_failed: *std.atomic.Value(bool),
 };
 
-/// Thread worker: builds one instance and prints status under the shared mutex.
+/// Thread worker: builds one instance and reports progress via the shared Status.
 fn buildWorker(ctx: *WorkerCtx) void {
+    const status = ctx.executor.status;
     const short_key = ctx.store_key[0..@min(16, ctx.store_key.len)];
 
-    {
-        ctx.stdout_mutex.lockUncancelable(ctx.executor.io);
-        defer ctx.stdout_mutex.unlock(ctx.executor.io);
-        var buf: [512]u8 = undefined;
-        var f: std.Io.File.Writer = .init(.stdout(), ctx.executor.io, &buf);
-        f.interface.print("[build] {s}  {s}\n", .{ ctx.display_key, short_key }) catch {};
-        f.interface.flush() catch {};
-    }
+    status.begin(ctx.display_key);
 
     ctx.executor.buildInstance(ctx.instance, ctx.display_key, ctx.store_key, ctx.mode) catch |err| {
         ctx.failed.store(true, .release);
         if (err == error.TestsFailed) ctx.test_failed.store(true, .release);
-        ctx.stdout_mutex.lockUncancelable(ctx.executor.io);
-        defer ctx.stdout_mutex.unlock(ctx.executor.io);
-        var buf: [512]u8 = undefined;
-        var f: std.Io.File.Writer = .init(.stdout(), ctx.executor.io, &buf);
-        f.interface.print("[fail]  {s}  {s}\n", .{ ctx.display_key, short_key }) catch {};
-        f.interface.flush() catch {};
+        status.fail(ctx.display_key, if (err == error.TestsFailed) "tests failed" else "build failed");
         return;
     };
 
     ctx.executor.reifyStoreHit(ctx.display_key, ctx.store_key, ctx.lockfile) catch {};
 
-    {
-        ctx.stdout_mutex.lockUncancelable(ctx.executor.io);
-        defer ctx.stdout_mutex.unlock(ctx.executor.io);
-        var buf: [512]u8 = undefined;
-        var f: std.Io.File.Writer = .init(.stdout(), ctx.executor.io, &buf);
-        f.interface.print("[done]  {s}  {s}\n", .{ ctx.display_key, short_key }) catch {};
-        f.interface.flush() catch {};
-    }
+    status.succeed(ctx.display_key, short_key);
 }
 
 pub const BuildExecutor = struct {
@@ -419,6 +400,8 @@ pub const BuildExecutor = struct {
     strict_lockfile: bool,
     /// Active build profile; supplies `-Doptimize`/`-Dtarget` flags for `zig build`.
     profile: profile_mod.Profile,
+    /// Live status reporter for child-build progress.
+    status: *status_mod.Status,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -430,6 +413,7 @@ pub const BuildExecutor = struct {
         max_jobs: usize,
         strict_lockfile: bool,
         profile: profile_mod.Profile,
+        status: *status_mod.Status,
     ) BuildExecutor {
         return .{
             .allocator = allocator,
@@ -441,6 +425,7 @@ pub const BuildExecutor = struct {
             .max_jobs = if (max_jobs == 0) 1 else max_jobs,
             .strict_lockfile = strict_lockfile,
             .profile = profile,
+            .status = status,
         };
     }
 
@@ -470,12 +455,8 @@ pub const BuildExecutor = struct {
         lockfile: model.Lockfile,
     ) !void {
         const allocator = self.allocator;
-        var stdout_buf: [4096]u8 = undefined;
-        var stdout_file: std.Io.File.Writer = .init(.stdout(), self.io, &stdout_buf);
-        const stdout = &stdout_file.interface;
-
+        const status = self.status;
         var any_test_failed = false;
-        var stdout_mutex: std.Io.Mutex = .init;
 
         // Pre-pass: detect source drift for all store hits before processing any waves.
         // Keys stored in `drifted` are borrowed from plan.build_order (valid for execute's lifetime).
@@ -500,16 +481,16 @@ pub const BuildExecutor = struct {
 
                 if (!std.mem.eql(u8, &actual_hex, inst.source_hash)) {
                     if (self.strict_lockfile) {
-                        try printStderr(self.io, "error: {s}: source has changed since last 'zpkg update'\n" ++
+                        status.log("error: {s}: source has changed since last 'zpkg update'\n" ++
                             "       lockfile hash: {s}\n" ++
                             "       actual hash:   {s}\n" ++
-                            "       Run 'zpkg update' to update the lockfile.\n", .{ key, inst.source_hash, actual_hex });
+                            "       Run 'zpkg update' to update the lockfile.", .{ key, inst.source_hash, actual_hex });
                         return error.SourceDrift;
                     } else {
-                        try printStderr(self.io, "warning: {s}: source has changed since last 'zpkg update'\n" ++
+                        status.log("warning: {s}: source has changed since last 'zpkg update'\n" ++
                             "         lockfile hash: {s}\n" ++
                             "         actual hash:   {s}\n" ++
-                            "         Forcing rebuild. Run 'zpkg update' to update the lockfile.\n", .{ key, inst.source_hash, actual_hex });
+                            "         Forcing rebuild. Run 'zpkg update' to update the lockfile.", .{ key, inst.source_hash, actual_hex });
                         try drifted.put(key, {});
                     }
                 }
@@ -525,14 +506,13 @@ pub const BuildExecutor = struct {
                 const short_key = store_key[0..@min(16, store_key.len)];
 
                 if (plan.mode == .run_tests) {
-                    try stdout.print("[skip] {s}  {s} (pre-built; no test binary)\n", .{ key, short_key });
+                    status.log("[skip] {s}  {s} (pre-built; no test binary)", .{ key, short_key });
                 } else {
-                    try stdout.print("[hit]  {s}  {s}\n", .{ key, short_key });
+                    status.log("[hit]  {s}  {s}", .{ key, short_key });
                 }
-                try stdout.flush();
 
                 self.reifyStoreHit(key, store_key, lockfile) catch |err| {
-                    try printStderr(self.io, "warning: failed to create binary adapter for '{s}': {s}\n", .{ key, @errorName(err) });
+                    status.log("warning: failed to create binary adapter for '{s}': {s}", .{ key, @errorName(err) });
                 };
             }
 
@@ -554,32 +534,29 @@ pub const BuildExecutor = struct {
                     const short_key = store_key[0..@min(16, store_key.len)];
 
                     const instance_ref = model.lockfile.InstanceRef.parse(key) catch {
-                        try printStderr(self.io, "error: invalid instance key in plan: {s}\n", .{key});
+                        status.log("error: invalid instance key in plan: {s}", .{key});
                         return error.InvalidInstanceKey;
                     };
                     const instance = lockfile.findInstance(instance_ref) orelse {
-                        try printStderr(self.io, "error: instance not found in lockfile: {s}\n", .{key});
+                        status.log("error: instance not found in lockfile: {s}", .{key});
                         return error.InstanceNotFound;
                     };
 
-                    try stdout.print("[build] {s}  {s}\n", .{ key, short_key });
-                    try stdout.flush();
+                    status.begin(key);
 
                     self.buildInstance(instance, key, store_key, plan.mode) catch |err| {
                         if (err == error.TestsFailed) {
                             any_test_failed = true;
-                            try stdout.print("[fail]  {s}  {s} (tests failed)\n", .{ key, short_key });
-                            try stdout.flush();
+                            status.fail(key, "tests failed");
                             continue;
                         }
                         return err;
                     };
 
-                    try stdout.print("[done]  {s}  {s}\n", .{ key, short_key });
-                    try stdout.flush();
+                    status.succeed(key, short_key);
 
                     self.reifyStoreHit(key, store_key, lockfile) catch |err| {
-                        try printStderr(self.io, "warning: failed to reify '{s}' after build: {s}\n", .{ key, @errorName(err) });
+                        status.log("warning: failed to reify '{s}' after build: {s}", .{ key, @errorName(err) });
                     };
                 }
             } else {
@@ -598,11 +575,11 @@ pub const BuildExecutor = struct {
                 for (ctxs, miss_keys.items) |*ctx, key| {
                     const store_key = plan.instance_keys.get(key) orelse key;
                     const instance_ref = model.lockfile.InstanceRef.parse(key) catch {
-                        try printStderr(self.io, "error: invalid instance key in plan: {s}\n", .{key});
+                        status.log("error: invalid instance key in plan: {s}", .{key});
                         return error.InvalidInstanceKey;
                     };
                     const instance = lockfile.findInstance(instance_ref) orelse {
-                        try printStderr(self.io, "error: instance not found in lockfile: {s}\n", .{key});
+                        status.log("error: instance not found in lockfile: {s}", .{key});
                         return error.InstanceNotFound;
                     };
                     ctx.* = .{
@@ -612,7 +589,6 @@ pub const BuildExecutor = struct {
                         .store_key = store_key,
                         .lockfile = lockfile,
                         .mode = plan.mode,
-                        .stdout_mutex = &stdout_mutex,
                         .failed = &wave_failed,
                         .test_failed = &wave_test_failed,
                     };
@@ -658,7 +634,7 @@ pub const BuildExecutor = struct {
         // Resolve source_path from the lockfile: if absolute, use as-is (old lockfile
         // backward compat); if relative, resolve against lockfile_dir.
         if (instance.source_path.len == 0) {
-            try printStderr(self.io, "error: '{s}' has no source_path in lockfile; re-run 'zpkg lock'\n", .{display_key});
+            self.status.log("error: '{s}' has no source_path in lockfile; re-run 'zpkg lock'", .{display_key});
             return error.MissingSourcePath;
         }
         const source_dir = try resolveLockfilePath(allocator, self.lockfile_dir, instance.source_path);
@@ -672,7 +648,7 @@ pub const BuildExecutor = struct {
         // tree, and rewrites build.zig.zon dependencies to workspace-local paths).
         var r = realizer_mod.Realizer.init(allocator, self.io, self.workspace, self.lockfile_dir);
         r.realizeSource(source_dir, display_key, instance) catch |err| {
-            try printStderr(self.io, "error: failed to realize source for '{s}': {s}\n", .{ display_key, @errorName(err) });
+            self.status.log("error: failed to realize source for '{s}': {s}", .{ display_key, @errorName(err) });
             return error.RealizeFailed;
         };
 
@@ -720,14 +696,14 @@ pub const BuildExecutor = struct {
             switch (result.term) {
                 .exited => |code| {
                     if (code != 0) {
-                        try printRaw(self.io, result.stderr);
-                        try printStderr(self.io, "error: build failed for '{s}' (exit code {d})\n", .{ display_key, code });
+                        self.status.logRaw(result.stderr);
+                        self.status.log("error: build failed for '{s}' (exit code {d})", .{ display_key, code });
                         return error.BuildFailed;
                     }
                 },
                 else => {
-                    try printRaw(self.io, result.stderr);
-                    try printStderr(self.io, "error: build process for '{s}' terminated abnormally\n", .{display_key});
+                    self.status.logRaw(result.stderr);
+                    self.status.log("error: build process for '{s}' terminated abnormally", .{display_key});
                     return error.BuildFailed;
                 },
             }
@@ -798,14 +774,14 @@ pub const BuildExecutor = struct {
             switch (test_result.term) {
                 .exited => |code| {
                     if (code != 0) {
-                        try printRaw(self.io, test_result.stderr);
-                        try printStderr(self.io, "error: tests failed for '{s}' (exit code {d})\n", .{ display_key, code });
+                        self.status.logRaw(test_result.stderr);
+                        self.status.log("error: tests failed for '{s}' (exit code {d})", .{ display_key, code });
                         return error.TestsFailed;
                     }
                 },
                 else => {
-                    try printRaw(self.io, test_result.stderr);
-                    try printStderr(self.io, "error: test process for '{s}' terminated abnormally\n", .{display_key});
+                    self.status.logRaw(test_result.stderr);
+                    self.status.log("error: test process for '{s}' terminated abnormally", .{display_key});
                     return error.TestsFailed;
                 },
             }
@@ -816,8 +792,6 @@ pub const BuildExecutor = struct {
 /// Resolve a lockfile source_path to an absolute path (see realizer.resolveLockfilePath).
 const resolveLockfilePath = realizer_mod.resolveLockfilePath;
 
-const printStderr = diag.writeStderrFmt;
-const printRaw = diag.writeStderr;
 
 /// Build the `zig build` flags for a profile: always `-Doptimize=<Mode>`, plus
 /// `-Dtarget=<triple>` when the profile targets a non-native triple.  Caller owns

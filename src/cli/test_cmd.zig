@@ -2,6 +2,7 @@ const std = @import("std");
 const build_cmd = @import("build.zig");
 const build_fallback = @import("../realize/build_fallback.zig");
 const realize = @import("../realize/root.zig");
+const status_mod = @import("../util/status.zig");
 const diag = @import("../util/diag.zig");
 
 pub const help_text =
@@ -17,6 +18,7 @@ pub const help_text =
     \\  --jobs N                Maximum number of parallel build jobs (default: CPU count; 1 for serial)
     \\  --strict-lockfile       Treat source drift as a hard error (default: warn and rebuild)
     \\  --release[=safe|fast|small]  Optimized build (bare --release = ReleaseFast; default is Debug)
+    \\  --progress auto|plain|live   Status display (default: auto — live on a TTY, plain otherwise)
     \\
     \\Note: --target is not supported for 'test' (running foreign-target binaries needs an emulator).
     \\
@@ -32,6 +34,7 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     var max_jobs: ?usize = null;
     var strict_lockfile = false;
     var profile: realize.Profile = .{};
+    var progress_mode: status_mod.Mode = .auto;
 
     var i: usize = 2;
     while (i < args.len) : (i += 1) {
@@ -55,6 +58,8 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
                 return error.InvalidArgument;
             }
             max_jobs = n;
+        } else if (try build_cmd.tryParseProgressFlag(args, &i, &progress_mode, io)) {
+            // handled
         } else if (try build_cmd.tryParseProfileFlag(args, &i, &profile, io)) {
             // handled
         } else if (pkg_root == null) {
@@ -71,5 +76,5 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     };
 
     // 'zpkg test' with a cross --target is rejected inside runBuild (needs an emulator).
-    try build_cmd.runBuild(root, .run_tests, io, max_jobs, strict_lockfile, profile);
+    try build_cmd.runBuild(root, .run_tests, io, max_jobs, strict_lockfile, profile, progress_mode);
 }
