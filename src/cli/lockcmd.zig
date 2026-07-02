@@ -1,4 +1,5 @@
 const std = @import("std");
+const model = @import("../model/root.zig");
 const conditions = @import("../model/conditions.zig");
 const schema = @import("../schema/zpkg.zig");
 const resolve = @import("../resolve/root.zig");
@@ -73,44 +74,28 @@ pub fn run(mode: Mode, args: []const []const u8, io: std.Io, help_text: []const 
     };
     defer manifest.deinitOwned(allocator);
 
-    // Resolve packages for the native host. Cross-target resolution is deferred
-    // (see docs/profile-target-axis-plan.md); the build profile is a separate axis.
-    const environment = conditions.detectHost();
-
-    var resolver = resolve.Resolver.init(allocator, environment.host_os, environment.host_arch, environment.target_os, environment.target_arch, &.{}, pkg_root, io);
-    defer resolver.deinit();
-
-    const resolved = resolver.resolveRoot(manifest) catch |err| {
-        try diag.writeError(io, "failed to resolve packages: {s}", .{@errorName(err)});
+    // Resolve + generate the lockfile.
+    const lockfile = resolveLockfile(allocator, io, pkg_root, manifest) catch |err| {
+        try diag.writeError(io, "failed to resolve dependencies: {s}", .{@errorName(err)});
         return error.InvalidArgument;
-    };
-
-    // Generate lockfile.
-    const lockfile = lockgen.generateLockfile(allocator, io, pkg_root, resolved, &resolver) catch |err| {
-        try diag.writeError(io, "failed to generate lockfile: {s}", .{@errorName(err)});
-        return error.OutOfMemory;
     };
     defer lockfile.deinit(allocator);
 
-    const lockfile_content = lockfile.toZonAlloc(allocator) catch |err| {
-        try diag.writeError(io, "failed to serialize lockfile: {s}", .{@errorName(err)});
-        return error.OutOfMemory;
-    };
-    defer allocator.free(lockfile_content);
-
     // `--dry-run` prints the lockfile instead of writing it.
     if (dry_run) {
-        try diag.writeStdout(io, lockfile_content);
+        const content = lockfile.toZonAlloc(allocator) catch |err| {
+            try diag.writeError(io, "failed to serialize lockfile: {s}", .{@errorName(err)});
+            return error.OutOfMemory;
+        };
+        defer allocator.free(content);
+        try diag.writeStdout(io, content);
         return;
     }
 
-    const file = dir.createFile(io, "zpkg.lock.zon", .{}) catch |err| {
+    writeLockfileToDir(allocator, io, dir, lockfile) catch |err| {
         try diag.writeError(io, "failed to write lockfile: {s}", .{@errorName(err)});
         return error.InvalidArgument;
     };
-    defer file.close(io);
-
-    try std.Io.File.writeStreamingAll(file, io, lockfile_content);
 
     try diag.writeStdout(io, switch (mode) {
         .create => "Lockfile created: zpkg.lock.zon\n",
@@ -118,7 +103,39 @@ pub fn run(mode: Mode, args: []const []const u8, io: std.Io, help_text: []const 
     });
 }
 
-fn lockfileExists(io: std.Io, dir: std.Io.Dir) bool {
+/// Resolve the package at `pkg_root` for the native host and build a Lockfile in
+/// memory. Caller owns the result (`lockfile.deinit(allocator)`). Cross-target
+/// resolution is deferred (see docs/profile-target-axis-plan.md); the build
+/// profile is a separate axis. Shared by `lock`/`update` and `build`'s auto-lock.
+pub fn resolveLockfile(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    pkg_root: []const u8,
+    manifest: schema.Manifest,
+) !model.Lockfile {
+    const environment = conditions.detectHost();
+    var resolver = resolve.Resolver.init(allocator, environment.host_os, environment.host_arch, environment.target_os, environment.target_arch, &.{}, pkg_root, io);
+    defer resolver.deinit();
+    const resolved = try resolver.resolveRoot(manifest);
+    // generateLockfile clones everything it needs, so the resolver may be freed after.
+    return lockgen.generateLockfile(allocator, io, pkg_root, resolved, &resolver);
+}
+
+/// Serialize `lockfile` and write it to `<dir>/zpkg.lock.zon`.
+pub fn writeLockfileToDir(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    dir: std.Io.Dir,
+    lockfile: model.Lockfile,
+) !void {
+    const content = try lockfile.toZonAlloc(allocator);
+    defer allocator.free(content);
+    const file = try dir.createFile(io, "zpkg.lock.zon", .{});
+    defer file.close(io);
+    try std.Io.File.writeStreamingAll(file, io, content);
+}
+
+pub fn lockfileExists(io: std.Io, dir: std.Io.Dir) bool {
     const f = dir.openFile(io, "zpkg.lock.zon", .{}) catch return false;
     f.close(io);
     return true;

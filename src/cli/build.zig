@@ -1,5 +1,6 @@
 const std = @import("std");
 const schema = @import("../schema/root.zig");
+const lockcmd = @import("lockcmd.zig");
 const realize = @import("../realize/root.zig");
 const build_fallback = @import("../realize/build_fallback.zig");
 const store_mod = @import("../store/store.zig");
@@ -10,11 +11,14 @@ const status_mod = @import("../util/status.zig");
 pub const help_text =
     \\zpkg build — Build all instances from the lockfile
     \\
+    \\If no zpkg.lock.zon exists yet, it is resolved and created automatically
+    \\(equivalent to running 'zpkg lock' first).
+    \\
     \\Usage:
     \\  zpkg build <pkg-root> [options]
     \\
     \\Arguments:
-    \\  <pkg-root>        Path to the package directory containing zpkg.lock.zon
+    \\  <pkg-root>        Path to the package directory containing zpkg.zon
     \\
     \\Options:
     \\  --with-tests            Also build test instances
@@ -206,6 +210,21 @@ pub fn runBuild(
         return error.InvalidArgument;
     };
     defer manifest.deinitOwned(allocator);
+
+    // Auto-lock: if there's no lockfile yet, resolve and create one so `zpkg build`
+    // works on a fresh checkout without a separate `zpkg lock` step.
+    if (!lockcmd.lockfileExists(io, pkg_dir)) {
+        try writeStderr(io, "No lockfile found; resolving dependencies and creating zpkg.lock.zon...\n");
+        const generated = lockcmd.resolveLockfile(allocator, io, abs_root, manifest) catch |err| {
+            try writeStderrFmt(io, "error: failed to resolve dependencies for lockfile: {s}\n", .{@errorName(err)});
+            return error.InvalidArgument;
+        };
+        defer generated.deinit(allocator);
+        lockcmd.writeLockfileToDir(allocator, io, pkg_dir, generated) catch |err| {
+            try writeStderrFmt(io, "error: failed to write lockfile: {s}\n", .{@errorName(err)});
+            return error.InvalidArgument;
+        };
+    }
 
     // Load zpkg.lock.zon.
     const lockfile_bytes = pkg_dir.readFileAlloc(io, "zpkg.lock.zon", allocator, .limited(4 * 1024 * 1024)) catch |err| switch (err) {

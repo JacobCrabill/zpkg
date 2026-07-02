@@ -48,6 +48,10 @@
 #                                 releasefast-native workspace, and it leaves the
 #                                 Debug slot's store hits intact. Confirms the
 #                                 profile is folded into the content-addressed key.
+#   9. Auto-lock                  `zpkg build` with no lockfile resolves and
+#                                 creates one, then proceeds; the regenerated
+#                                 lockfile is deterministic (identical store keys
+#                                 → all hits), i.e. equivalent to `zpkg lock`.
 #
 # NOT COVERED (intentionally out of scope for this test):
 #   - Cross-compilation targets (--target): only native profiles are built here;
@@ -203,6 +207,20 @@ assert_contains "$rel2_out" "5 instances (5 store hits, 0 to build)" "second --r
 dbg_out="$("$ZPKG_BIN" build "$APP" 2>&1)"
 assert_contains "$dbg_out" "5 instances (5 store hits, 0 to build)" \
     "Debug slot still intact after building --release"
+echo
+
+# --- 9. Auto-lock: build with no lockfile regenerates it ----------------------
+# Removing the lockfile and building must recreate it and proceed. Because the
+# regenerated lockfile is deterministic (identical to the original), the Debug
+# store keys still match — so the plan is all hits, proving the auto-generated
+# lockfile is byte-for-byte equivalent to a manual `zpkg lock`.
+echo "${BOLD}[9] zpkg build auto-creates a missing lockfile${RESET}"
+rm -f "$APP/zpkg.lock.zon"
+auto_out="$("$ZPKG_BIN" build "$APP" 2>&1)"
+assert_contains "$auto_out" "No lockfile found" "build reports the missing lockfile"
+assert_file "$APP/zpkg.lock.zon" "lockfile recreated by build"
+assert_contains "$auto_out" "5 instances (5 store hits, 0 to build)" \
+    "auto-generated lockfile matches the original (identical store keys → all hits)"
 echo
 
 # --- Summary ------------------------------------------------------------------
