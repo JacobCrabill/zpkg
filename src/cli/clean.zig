@@ -72,12 +72,15 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
 }
 
 fn removeDirRel(io: std.Io, dir: std.Io.Dir, root: []const u8, sub: []const u8) !usize {
-    // Check existence before deleting; openDir returns FileNotFound when absent.
-    var check = dir.openDir(io, sub, .{}) catch |err| {
+    // Existence check that does NOT follow symlinks: `zig-out` is a symlink into
+    // `.zpkg/work`, so once work is removed it dangles — a following check (openDir)
+    // would then miss it and leave the dead symlink behind. `access` with
+    // follow_symlinks=false detects the link node itself. `deleteTree` is idempotent
+    // and unlinks symlinks without following them.
+    dir.access(io, sub, .{ .follow_symlinks = false }) catch |err| {
         if (err == error.FileNotFound) return 0;
         return err;
     };
-    check.close(io);
     try dir.deleteTree(io, sub);
     try diag.writeStdoutFmt(io, "removed {s}/{s}\n", .{ root, sub });
     return 1;
