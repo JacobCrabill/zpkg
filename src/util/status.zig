@@ -16,6 +16,15 @@ const tick_ms = 125;
 /// Monotonic-while-awake clock: good for elapsed timers and the tick interval.
 const clock: std.Io.Clock = .awake;
 
+/// ANSI SGR codes, applied only in live (TTY) mode via `Status.c`.
+const ansi = struct {
+    const reset = "\x1b[0m";
+    const green = "\x1b[32m";
+    const red = "\x1b[31m";
+    const cyan = "\x1b[36m";
+    const dim = "\x1b[2m";
+};
+
 pub const Mode = enum { auto, plain, live };
 
 pub const Status = struct {
@@ -46,10 +55,12 @@ pub const Status = struct {
     const Job = struct { name: []u8, start: std.Io.Timestamp };
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, verb: []const u8, total: usize, mode: Mode) Status {
+        // Progress/status is written to stderr (leaving stdout for results), so the
+        // live vs plain decision follows whether *stderr* is a terminal.
         const live = switch (mode) {
             .plain => false,
             .live => true,
-            .auto => std.Io.File.stdout().isTty(io) catch false,
+            .auto => std.Io.File.stderr().isTty(io) catch false,
         };
         return .{
             .allocator = allocator,
@@ -108,15 +119,15 @@ pub const Status = struct {
 
     /// Mark a running job as finished successfully; prints a permanent line.
     pub fn succeed(self: *Status, name: []const u8, detail: []const u8) void {
-        self.finishJob(name, "[done] ", detail, true);
+        self.finishJob(name, "[done]", ansi.green, detail, true);
     }
 
     /// Mark a running job as failed; prints a permanent line.
     pub fn fail(self: *Status, name: []const u8, detail: []const u8) void {
-        self.finishJob(name, "[fail] ", detail, false);
+        self.finishJob(name, "[fail]", ansi.red, detail, false);
     }
 
-    fn finishJob(self: *Status, name: []const u8, tag: []const u8, detail: []const u8, ok: bool) void {
+    fn finishJob(self: *Status, name: []const u8, tag: []const u8, tag_color: []const u8, detail: []const u8, ok: bool) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
 
@@ -125,9 +136,13 @@ pub const Status = struct {
 
         self.clearLive();
         if (ok and elapsed_ms != null) {
-            self.emitFmt("{s} {s}  {s}  {d:.1}s\n", .{ tag, name, detail, msToSecs(elapsed_ms.?) });
+            self.emitFmt("{s}{s}{s} {s}  {s}  {s}{d:.1}s{s}\n", .{
+                self.c(tag_color),  tag,    self.c(ansi.reset),
+                name,               detail, self.c(ansi.dim),
+                msToSecs(elapsed_ms.?), self.c(ansi.reset),
+            });
         } else {
-            self.emitFmt("{s} {s}  {s}\n", .{ tag, name, detail });
+            self.emitFmt("{s}{s}{s} {s}  {s}\n", .{ self.c(tag_color), tag, self.c(ansi.reset), name, detail });
         }
         self.drawLive();
     }
@@ -191,7 +206,7 @@ pub const Status = struct {
         const w = &aw.writer;
 
         const spin = spinner_frames[self.frame % spinner_frames.len];
-        try w.print("{s} {s} [{d}/{d}]", .{ spin, self.verb, self.completed, self.displayedTotal() });
+        try w.print("{s}{s}{s} {s} [{d}/{d}]", .{ self.c(ansi.cyan), spin, self.c(ansi.reset), self.verb, self.completed, self.displayedTotal() });
 
         const current = self.now();
         for (self.active.items, 0..) |job, idx| {
@@ -209,8 +224,13 @@ pub const Status = struct {
         return @max(self.total, self.completed + self.active.items.len);
     }
 
+    /// A color code, or "" when not in live (TTY) mode.
+    fn c(self: *Status, code: []const u8) []const u8 {
+        return if (self.live) code else "";
+    }
+
     fn writer(self: *Status) *std.Io.Writer {
-        if (self.out == null) self.out = .init(.stdout(), self.io, &self.out_buf);
+        if (self.out == null) self.out = .init(.stderr(), self.io, &self.out_buf);
         return &self.out.?.interface;
     }
 

@@ -503,14 +503,9 @@ pub const BuildExecutor = struct {
                 if (!plan.store_hits.contains(key)) continue;
                 if (drifted.contains(key)) continue; // drift detected: rebuild in miss pass below
                 const store_key = plan.instance_keys.get(key) orelse key;
-                const short_key = store_key[0..@min(16, store_key.len)];
 
-                if (plan.mode == .run_tests) {
-                    status.log("[skip] {s}  {s} (pre-built; no test binary)", .{ key, short_key });
-                } else {
-                    status.log("[hit]  {s}  {s}", .{ key, short_key });
-                }
-
+                // Store hits are instant and already counted in the plan summary, so we
+                // don't emit a line each — only build steps (the slow part) are shown.
                 self.reifyStoreHit(key, store_key, lockfile) catch |err| {
                     status.log("warning: failed to create binary adapter for '{s}': {s}", .{ key, @errorName(err) });
                 };

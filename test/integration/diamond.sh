@@ -192,7 +192,7 @@ echo "${BOLD}[8] zpkg build --release (distinct profile)${RESET}"
 rel1_out="$("$ZPKG_BIN" build "$APP" --release 2>&1)"
 assert_contains "$rel1_out" "5 instances (0 store hits, 5 to build)" \
     "--release is a cold build (Debug artifacts don't collide)"
-assert_contains "$rel1_out" "Profile: releasefast-native" "reports the releasefast-native profile"
+assert_contains "$rel1_out" "(releasefast-native)" "reports the releasefast-native profile"
 assert_file "$APP/.zpkg/work/releasefast-native/root/build.zig.zon" "separate releasefast-native workspace exists"
 rel_app_out="$("$APP/zig-out/bin/app" 2>&1)"
 assert_eq "$rel_app_out" "e_transform(3, 4, 8) = 24" "release app output correct"

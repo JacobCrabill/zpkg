@@ -255,16 +255,11 @@ pub fn runBuild(
     var plan = try build_fallback.planBuild(allocator, lockfile, &store, mode, key_config);
     defer plan.deinit();
 
-    // Print plan summary.
-    var stdout_buf: [4096]u8 = undefined;
-    var stdout_file: std.Io.File.Writer = .init(.stdout(), io, &stdout_buf);
-    const stdout = &stdout_file.interface;
-
-    try stdout.print(
-        "Build plan: {d} instances ({d} store hits, {d} to build)\n",
-        .{ plan.build_order.len, plan.store_hits.count(), plan.store_misses.count() },
-    );
-    try stdout.flush();
+    // Status, plan/summary, and progress all go to stderr, leaving stdout for
+    // genuine machine-readable command output.
+    try writeStderrFmt(io, "Build plan: {d} instances ({d} store hits, {d} to build)\n", .{
+        plan.build_order.len, plan.store_hits.count(), plan.store_misses.count(),
+    });
 
     // Resolve max_jobs: explicit flag > CPU count > fallback of 4.
     const max_jobs = max_jobs_override orelse (std.Thread.getCpuCount() catch 4);
@@ -274,6 +269,8 @@ pub fn runBuild(
     defer status.deinit();
     defer status.stop(); // safety on error paths; stop() is idempotent
     status.start();
+
+    const build_start = std.Io.Timestamp.now(io, .awake);
 
     // Execute plan.
     var executor = build_fallback.BuildExecutor.init(allocator, io, &store, &layout, abs_root, abs_root, max_jobs, strict_lockfile, profile, &status);
@@ -286,11 +283,14 @@ pub fn runBuild(
 
     // Stop the live line before the final summary so it prints on a clean row.
     status.stop();
-    try stdout.print(
-        "Build complete. Profile: {s}\n",
-        .{profile_slug},
-    );
-    try stdout.flush();
+
+    const elapsed_s = @as(f64, @floatFromInt(build_start.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds())) / 1000.0;
+    const zig_out_path = try std.Io.Dir.path.join(allocator, &.{ abs_root, "zig-out" });
+    defer allocator.free(zig_out_path);
+    try writeStderrFmt(io, "Build complete in {d:.1}s — {d} built, {d} cached ({s})\n", .{
+        elapsed_s, plan.store_misses.count(), plan.store_hits.count(), profile_slug,
+    });
+    try writeStderrFmt(io, "  output: {s}\n", .{zig_out_path});
 }
 
 fn buildRoot(
