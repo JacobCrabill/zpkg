@@ -7,8 +7,13 @@ const realize_cmd = @import("realize.zig");
 const build_cmd = @import("build.zig");
 const test_cmd = @import("test_cmd.zig");
 const export_cmd = @import("export.zig");
+const version_cmd = @import("version.zig");
+const clean_cmd = @import("clean.zig");
 const workspace = @import("../util/workspace.zig");
 const diag = @import("../util/diag.zig");
+
+// keep in sync with build.zig.zon
+pub const zpkg_version = version_cmd.zpkg_version;
 
 pub const help_text =
     \\zpkg - Zig package workspace realizer
@@ -27,6 +32,8 @@ pub const help_text =
     \\  build     Build from an authoritative lockfile
     \\  test      Build and run the test graph
     \\  export    Export a relocatable closure bundle
+    \\  clean     Remove generated build artifacts
+    \\  version   Print the zpkg version
     \\
     \\Generated workspace root: .zpkg/
     \\
@@ -35,6 +42,10 @@ pub const help_text =
 pub fn run(args: []const []const u8, io: std.Io) !void {
     if (shouldShowHelp(args) or args.len == 1) {
         return writeHelp(io);
+    }
+
+    if (std.mem.eql(u8, args[1], "--version") or std.mem.eql(u8, args[1], "-V")) {
+        return diag.writeStdoutFmt(io, "zpkg {s}\n", .{zpkg_version});
     }
 
     if (std.mem.eql(u8, args[1], "inspect")) {
@@ -53,6 +64,10 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
         return test_cmd.run(args, io);
     } else if (std.mem.eql(u8, args[1], "export")) {
         return export_cmd.run(args, io);
+    } else if (std.mem.eql(u8, args[1], "clean")) {
+        return clean_cmd.run(args, io);
+    } else if (std.mem.eql(u8, args[1], "version")) {
+        return version_cmd.run(args, io);
     }
 
     return writeUnknownCommand(io, args[1]);
