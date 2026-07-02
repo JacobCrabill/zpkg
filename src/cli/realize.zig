@@ -29,16 +29,15 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
         return;
     }
     if (args.len != 3) {
-        try writeStderr(io,
-            "error: realize expects exactly one package root path\n" ++
-            "usage: zpkg realize <pkg-root>\n");
+        try diag_util.writeError(io, "realize expects exactly one package root path", .{});
+        try diag_util.writeHint(io, "usage: zpkg realize <pkg-root>", .{});
         return error.InvalidArgument;
     }
 
     const allocator = std.heap.page_allocator;
 
     const abs_root = diag_util.resolveAbsPath(allocator, args[2]) catch |err| {
-        try writeStderrFmt(io, "error: cannot resolve path '{s}': {s}\n", .{ args[2], @errorName(err) });
+        try diag_util.writeError(io, "cannot resolve path '{s}': {s}", .{ args[2], @errorName(err) });
         return error.InvalidArgument;
     };
     defer allocator.free(abs_root);
@@ -46,14 +45,15 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
 
     // 1. Open pkg-root dir
     var pkg_dir = std.Io.Dir.openDirAbsolute(io, pkg_root, .{}) catch |err| {
-        try writeStderrFmt(io, "error: cannot open package root '{s}': {s}\n", .{ pkg_root, @errorName(err) });
+        try diag_util.writeError(io, "cannot open package root '{s}': {s}", .{ pkg_root, @errorName(err) });
         return error.InvalidArgument;
     };
     defer pkg_dir.close(io);
 
     // 2. Parse zpkg.zon
     var manifest = schema.zpkg.parseFileAlloc(allocator, pkg_dir, io, "zpkg.zon") catch |err| {
-        try writeStderrFmt(io, "error: failed to parse zpkg.zon: {s}\n", .{@errorName(err)});
+        try diag_util.writeError(io, "failed to parse zpkg.zon: {s}", .{@errorName(err)});
+        try diag_util.writeHint(io, "is '{s}' a zpkg package? it needs a valid zpkg.zon", .{pkg_root});
         return error.InvalidArgument;
     };
     defer manifest.deinitOwned(allocator);
@@ -61,7 +61,7 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     // 3. Load zpkg.lock.zon
     const lockfile_bytes = pkg_dir.readFileAlloc(io, "zpkg.lock.zon", allocator, .limited(4 * 1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => {
-            try writeStderr(io, "error: no lockfile found; run 'zpkg lock <pkg-root>' first\n");
+            try diag_util.writeLockfileMissingError(io);
             return error.LockfileNotFound;
         },
         else => return err,
@@ -72,17 +72,19 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     defer allocator.free(lockfile_sentinel);
 
     const lockfile = schema.parseLockfileSourceAlloc(allocator, lockfile_sentinel) catch |err| {
-        try writeStderrFmt(io, "error: failed to parse zpkg.lock.zon: {s}\n", .{@errorName(err)});
+        try diag_util.writeError(io, "failed to parse zpkg.lock.zon: {s}", .{@errorName(err)});
+        try diag_util.writeHint(io, "run 'zpkg lock {s}' to regenerate the lockfile", .{pkg_root});
         return error.InvalidArgument;
     };
     defer lockfile.deinit(allocator);
 
     // 4. Validate lockfile root matches zpkg.zon identity
     if (!lockfile.root.package_id.eql(manifest.package.id)) {
-        try writeStderrFmt(io,
-            "error: lockfile root '{s}' does not match zpkg.zon package '{s}'\n",
+        try diag_util.writeError(io,
+            "lockfile root '{s}' does not match zpkg.zon package '{s}'",
             .{ lockfile.root.package_id.asText(), manifest.package.id.asText() },
         );
+        try diag_util.writeHint(io, "re-run 'zpkg lock {s}' to regenerate the lockfile", .{pkg_root});
         return error.LockfileMismatch;
     }
 

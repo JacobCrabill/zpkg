@@ -45,17 +45,15 @@ pub fn inspectPackageAlloc(
 ) ![]u8 {
     var dir = std.Io.Dir.cwd().openDir(io, pkg_root, .{}) catch |err| {
         if (!diagnostics) return err;
-        try writeStderrFmt(io, "error: cannot open package root {s}: {s}\n", .{ pkg_root, @errorName(err) });
+        try diag.writeError(io, "cannot open package root '{s}': {s}", .{ pkg_root, @errorName(err) });
         return error.InvalidArgument;
     };
     defer dir.close(io);
 
     if (diagnostics) {
         // Give a targeted message when zpkg.zon itself is missing.
-        const f = dir.openFile(io, "zpkg.zon", .{}) catch |err| {
-            const manifest_path = try std.fs.path.join(allocator, &.{ pkg_root, "zpkg.zon" });
-            defer allocator.free(manifest_path);
-            try writeStderrFmt(io, "error: cannot open manifest {s}: {s}\n", .{ manifest_path, @errorName(err) });
+        const f = dir.openFile(io, "zpkg.zon", .{}) catch {
+            try diag.writeManifestMissingError(io, pkg_root);
             return error.InvalidArgument;
         };
         f.close(io);
@@ -68,6 +66,7 @@ pub fn inspectPackageAlloc(
         const diagnostic = try zpkg_schema.formatDiagnosticAlloc(allocator, manifest_path, err);
         defer allocator.free(diagnostic);
         try writeStderr(io, diagnostic);
+        try diag.writeHint(io, "is '{s}' a zpkg package? it needs a valid zpkg.zon", .{pkg_root});
         return error.InvalidArgument;
     };
     defer manifest.deinitOwned(allocator);
@@ -80,9 +79,8 @@ fn writeHelp(io: std.Io) !void {
 }
 
 fn writeUsageError(io: std.Io) !void {
-    try writeStderr(io,
-        "error: inspect expects exactly one package root path\n" ++
-        "usage: zpkg inspect <pkg-root>\n");
+    try diag.writeError(io, "inspect expects exactly one package root path", .{});
+    try diag.writeHint(io, "usage: zpkg inspect <pkg-root>", .{});
 }
 
 const writeStderr = diag.writeStderr;

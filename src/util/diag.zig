@@ -87,3 +87,8 @@ pub fn writeLockfileMissingError(io: std.Io) !void {
     try writeError(io, "no lockfile found", .{});
     try writeHint(io, "run 'zpkg lock <pkg-root>' to create one", .{});
 }
+
+pub fn writeManifestMissingError(io: std.Io, pkg_root: []const u8) !void {
+    try writeError(io, "no zpkg.zon found in '{s}'", .{pkg_root});
+    try writeHint(io, "is '{s}' a zpkg package? it needs a zpkg.zon", .{pkg_root});
+}

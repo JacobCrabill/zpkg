@@ -29,14 +29,15 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
         } else if (pkg_root == null) {
             pkg_root = arg;
         } else {
-            try writeStderrFmt(io, "error: unexpected argument: {s}\n\n{s}", .{ arg, usage_text });
+            try diag.writeError(io, "unexpected argument: {s}", .{arg});
+            try diag.writeHint(io, "run 'zpkg graph --help' for usage", .{});
             return error.InvalidArgument;
         }
     }
 
     const root = pkg_root orelse {
-        try writeStderr(io, "error: graph expects a package root path\n\n");
-        try writeStderr(io, usage_text);
+        try diag.writeError(io, "graph expects a package root path", .{});
+        try diag.writeHint(io, "usage: zpkg graph <pkg-root> [--verbose]", .{});
         return error.InvalidArgument;
     };
 
@@ -44,7 +45,7 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
 
     // Open pkg-root dir
     var pkg_dir = std.Io.Dir.cwd().openDir(io, root, .{}) catch |err| {
-        try writeStderrFmt(io, "error: cannot open package root '{s}': {s}\n", .{ root, @errorName(err) });
+        try diag.writeError(io, "cannot open package root '{s}': {s}", .{ root, @errorName(err) });
         return error.InvalidArgument;
     };
     defer pkg_dir.close(io);
@@ -63,7 +64,8 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     defer allocator.free(lockfile_sentinel);
 
     const lockfile = schema.parseLockfileSourceAlloc(allocator, lockfile_sentinel) catch |err| {
-        try writeStderrFmt(io, "error: failed to parse zpkg.lock.zon: {s}\n", .{@errorName(err)});
+        try diag.writeError(io, "failed to parse zpkg.lock.zon: {s}", .{@errorName(err)});
+        try diag.writeHint(io, "run 'zpkg lock <pkg-root>' to regenerate the lockfile", .{});
         return error.InvalidArgument;
     };
     defer lockfile.deinit(allocator);

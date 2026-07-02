@@ -35,13 +35,15 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
         } else if (named_arg == null) {
             named_arg = args[i];
         } else {
-            try writeStderrFmt(io, "error: unexpected argument: {s}\n", .{args[i]});
+            try diag_util.writeError(io, "unexpected argument: {s}", .{args[i]});
+            try diag_util.writeHint(io, "run 'zpkg export --help' for usage", .{});
             return error.InvalidArgument;
         }
     }
 
     const root = pkg_root orelse {
-        try writeStderr(io, "error: export expects a package root path\nusage: zpkg export <pkg-root> [<package_id>:<target_name>]\n");
+        try diag_util.writeError(io, "export expects a package root path", .{});
+        try diag_util.writeHint(io, "usage: zpkg export <pkg-root> [<package_id>:<target_name>]", .{});
         return error.InvalidArgument;
     };
 
@@ -50,21 +52,21 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     const allocator = gpa.allocator();
 
     const abs_root = diag_util.resolveAbsPath(allocator, root) catch |err| {
-        try writeStderrFmt(io, "error: cannot resolve path '{s}': {s}\n", .{ root, @errorName(err) });
+        try diag_util.writeError(io, "cannot resolve path '{s}': {s}", .{ root, @errorName(err) });
         return error.InvalidArgument;
     };
     defer allocator.free(abs_root);
 
     // Load lockfile bytes.
     var pkg_dir = std.Io.Dir.openDirAbsolute(io, abs_root, .{}) catch |err| {
-        try writeStderrFmt(io, "error: cannot open package root '{s}': {s}\n", .{ abs_root, @errorName(err) });
+        try diag_util.writeError(io, "cannot open package root '{s}': {s}", .{ abs_root, @errorName(err) });
         return error.InvalidArgument;
     };
     defer pkg_dir.close(io);
 
     const lockfile_bytes = pkg_dir.readFileAlloc(io, "zpkg.lock.zon", allocator, .limited(4 * 1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => {
-            try writeStderr(io, "error: no lockfile found; run 'zpkg lock <pkg-root>' first\n");
+            try diag_util.writeLockfileMissingError(io);
             return error.LockfileNotFound;
         },
         else => return err,
@@ -75,7 +77,8 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     defer allocator.free(lockfile_sentinel);
 
     const lockfile = schema.parseLockfileSourceAlloc(allocator, lockfile_sentinel) catch |err| {
-        try writeStderrFmt(io, "error: failed to parse zpkg.lock.zon: {s}\n", .{@errorName(err)});
+        try diag_util.writeError(io, "failed to parse zpkg.lock.zon: {s}", .{@errorName(err)});
+        try diag_util.writeHint(io, "run 'zpkg lock <pkg-root>' to regenerate the lockfile", .{});
         return error.InvalidArgument;
     };
     defer lockfile.deinit(allocator);
@@ -85,7 +88,8 @@ pub fn run(args: []const []const u8, io: std.Io) !void {
     if (named_arg) |named| {
         // Parse "package_id:target_name"
         const colon = std.mem.indexOfScalar(u8, named, ':') orelse {
-            try writeStderrFmt(io, "error: named target must be 'package_id:target_name', got '{s}'\n", .{named});
+            try diag_util.writeError(io, "named target must be 'package_id:target_name', got '{s}'", .{named});
+            try diag_util.writeHint(io, "example: zpkg export . myorg.mypkg:my_lib", .{});
             return error.InvalidArgument;
         };
         opts.target = .{ .named = .{

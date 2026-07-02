@@ -45,22 +45,21 @@ pub fn run(mode: Mode, args: []const []const u8, io: std.Io, help_text: []const 
     // Resolve the package root to an absolute path so it serves as the base for
     // computing relative source_path values in the lockfile.
     const pkg_root = diag.resolveAbsPath(allocator, pkg_root_raw) catch |err| {
-        try diag.writeStderrFmt(io, "error: cannot resolve path '{s}': {s}\n", .{ pkg_root_raw, @errorName(err) });
+        try diag.writeError(io, "cannot resolve path '{s}': {s}", .{ pkg_root_raw, @errorName(err) });
         return error.InvalidArgument;
     };
     defer allocator.free(pkg_root);
 
     var dir = std.Io.Dir.cwd().openDir(io, pkg_root, .{}) catch |err| {
-        try diag.writeStderrFmt(io, "error: cannot open package root {s}: {s}\n", .{ pkg_root, @errorName(err) });
+        try diag.writeError(io, "cannot open package root '{s}': {s}", .{ pkg_root, @errorName(err) });
         return error.InvalidArgument;
     };
     defer dir.close(io);
 
     // `lock` refuses to overwrite an existing lockfile; `update` rewrites it.
     if (mode == .create and lockfileExists(io, dir)) {
-        try diag.writeStderr(io,
-            "error: lockfile already exists\n" ++
-            "use 'zpkg update' to update an existing lockfile\n");
+        try diag.writeError(io, "lockfile already exists", .{});
+        try diag.writeHint(io, "use 'zpkg update <pkg-root>' to refresh an existing lockfile", .{});
         return error.LockfileExists;
     }
 
@@ -69,6 +68,7 @@ pub fn run(mode: Mode, args: []const []const u8, io: std.Io, help_text: []const 
         const diagnostic = schema.formatDiagnosticAlloc(allocator, "zpkg.zon", err) catch "";
         defer allocator.free(diagnostic);
         try diag.writeStderr(io, diagnostic);
+        try diag.writeHint(io, "is '{s}' a zpkg package? it needs a valid zpkg.zon", .{pkg_root});
         return error.InvalidArgument;
     };
     defer manifest.deinitOwned(allocator);
@@ -81,19 +81,19 @@ pub fn run(mode: Mode, args: []const []const u8, io: std.Io, help_text: []const 
     defer resolver.deinit();
 
     const resolved = resolver.resolveRoot(manifest) catch |err| {
-        try diag.writeStderrFmt(io, "error: failed to resolve packages: {s}\n", .{@errorName(err)});
+        try diag.writeError(io, "failed to resolve packages: {s}", .{@errorName(err)});
         return error.InvalidArgument;
     };
 
     // Generate lockfile.
     const lockfile = lockgen.generateLockfile(allocator, io, pkg_root, resolved, &resolver) catch |err| {
-        try diag.writeStderrFmt(io, "error: failed to generate lockfile: {s}\n", .{@errorName(err)});
+        try diag.writeError(io, "failed to generate lockfile: {s}", .{@errorName(err)});
         return error.OutOfMemory;
     };
     defer lockfile.deinit(allocator);
 
     const lockfile_content = lockfile.toZonAlloc(allocator) catch |err| {
-        try diag.writeStderrFmt(io, "error: failed to generate lockfile: {s}\n", .{@errorName(err)});
+        try diag.writeError(io, "failed to serialize lockfile: {s}", .{@errorName(err)});
         return error.OutOfMemory;
     };
     defer allocator.free(lockfile_content);
@@ -105,7 +105,7 @@ pub fn run(mode: Mode, args: []const []const u8, io: std.Io, help_text: []const 
     }
 
     const file = dir.createFile(io, "zpkg.lock.zon", .{}) catch |err| {
-        try diag.writeStderrFmt(io, "error: failed to write lockfile: {s}\n", .{@errorName(err)});
+        try diag.writeError(io, "failed to write lockfile: {s}", .{@errorName(err)});
         return error.InvalidArgument;
     };
     defer file.close(io);
@@ -125,10 +125,14 @@ fn lockfileExists(io: std.Io, dir: std.Io.Dir) bool {
 }
 
 fn usageError(io: std.Io, mode: Mode) !void {
-    try diag.writeStderr(io, switch (mode) {
-        .create => "error: lock expects exactly one package root path\n" ++
-            "usage: zpkg lock <pkg-root>\n",
-        .update => "error: update expects exactly one package root path\n" ++
-            "usage: zpkg update <pkg-root> [--dry-run]\n",
-    });
+    switch (mode) {
+        .create => {
+            try diag.writeError(io, "lock expects exactly one package root path", .{});
+            try diag.writeHint(io, "usage: zpkg lock <pkg-root>", .{});
+        },
+        .update => {
+            try diag.writeError(io, "update expects exactly one package root path", .{});
+            try diag.writeHint(io, "usage: zpkg update <pkg-root> [--dry-run]", .{});
+        },
+    }
 }
