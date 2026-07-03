@@ -3,6 +3,7 @@ const model = @import("../model/root.zig");
 const conditions = @import("../model/conditions.zig");
 const options = @import("../model/options.zig");
 const schema = @import("../schema/zpkg.zig");
+const diag = @import("../util/diag.zig");
 
 pub const ResolverError = error{
     UnknownDependency,
@@ -198,7 +199,7 @@ pub const Resolver = struct {
             // A package resolves to a single version, so a second dependent whose
             // requirement disagrees with that version surfaces here as a conflict.
             if (!dep.require.satisfies(dep_manifest.package.version)) {
-                reportUnsatisfied(dep, dep_manifest.package.version);
+                reportUnsatisfied(self.io, dep, dep_manifest.package.version);
                 return error.UnsatisfiedRequirement;
             }
 
@@ -216,10 +217,8 @@ pub const Resolver = struct {
 
     fn parseDependencyManifest(self: *Resolver, dep: model.Dependency, current_source_dir: []const u8) !model.PackageManifest {
         const sp = dep.source_path orelse {
-            std.log.err("zpkg: dependency '{s}' (package '{s}') has no source_path.\n" ++
-                "Add .source_path = \"<relative-path>\" to the deps.{s} entry in zpkg.zon.", .{
-                dep.alias, dep.package.asText(), dep.alias,
-            });
+            diag.writeError(self.io, "dependency '{s}' (package '{s}') has no source_path", .{ dep.alias, dep.package.asText() }) catch {};
+            diag.writeHint(self.io, "add .source_path = \"<relative-path>\" to the deps.{s} entry in zpkg.zon", .{dep.alias}) catch {};
             return error.MissingSourcePath;
         };
 
@@ -227,13 +226,13 @@ pub const Resolver = struct {
         defer self.allocator.free(abs_dep_dir);
 
         var dep_dir = std.Io.Dir.cwd().openDir(self.io, abs_dep_dir, .{}) catch {
-            std.log.err("zpkg: dependency manifest not found at '{s}/zpkg.zon'", .{abs_dep_dir});
+            diag.writeError(self.io, "dependency manifest not found at '{s}/zpkg.zon'", .{abs_dep_dir}) catch {};
             return error.DependencyManifestNotFound;
         };
         defer dep_dir.close(self.io);
 
         var dep_manifest = schema.parseFileAlloc(self.allocator, dep_dir, self.io, "zpkg.zon") catch {
-            std.log.err("zpkg: failed to parse dependency manifest at '{s}/zpkg.zon'", .{abs_dep_dir});
+            diag.writeError(self.io, "failed to parse dependency manifest at '{s}/zpkg.zon'", .{abs_dep_dir}) catch {};
             return error.DependencyManifestNotFound;
         };
         errdefer dep_manifest.deinitOwned(self.allocator);
@@ -429,17 +428,17 @@ fn formatInstanceKey(allocator: std.mem.Allocator, package_id: model.PackageId, 
     );
 }
 
-/// Log a version-requirement failure. Because a package resolves to one version,
-/// this also reports diamond conflicts (the second dependent whose range the
-/// shared version doesn't satisfy).
-fn reportUnsatisfied(dep: model.Dependency, resolved: model.Version) void {
+/// Report a version-requirement failure. Because a package resolves to one
+/// version, this also reports diamond conflicts (the second dependent whose range
+/// the shared version doesn't satisfy).
+fn reportUnsatisfied(io: std.Io, dep: model.Dependency, resolved: model.Version) void {
     var rbuf: [64]u8 = undefined;
     var vbuf: [32]u8 = undefined;
     const rtext = dep.require.bufPrint(&rbuf) catch "?";
     const vtext = resolved.bufPrint(&vbuf) catch "?";
-    std.log.err("zpkg: dependency '{s}' requires {s}, but '{s}' resolves to {s}", .{
+    diag.writeError(io, "dependency '{s}' requires {s}, but '{s}' resolves to {s}", .{
         dep.alias, rtext, dep.package.asText(), vtext,
-    });
+    }) catch {};
 }
 
 test "resolver initializes correctly" {
@@ -472,6 +471,50 @@ test "resolver resolves empty package" {
     try std.testing.expectEqualStrings("test.example.test", resolved.package_id.asText());
 }
 
-// Requirement *satisfaction* is unit-tested in model/package.zig; the resolver's
-// enforcement (which logs via std.log.err and would trip the test runner's
-// error-log check) is covered out-of-process by the diamond integration test.
+test "resolver enforces version requirements" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+
+    // Capture the resolver's diagnostic: keeps it off the real stderr (which would
+    // corrupt the test runner's --listen IPC) and lets us assert its content.
+    var captured: std.Io.Writer.Allocating = .init(allocator);
+    defer captured.deinit();
+    diag.setStderrOverride(&captured.writer);
+    defer diag.setStderrOverride(null);
+
+    // Source root is examples/diamond/libC; its sibling ../libA is version 0.1.0.0.
+    var deps = [_]model.Dependency{.{
+        .alias = "libA",
+        .package = model.PackageId.parse("diamond.libA") catch unreachable,
+        .require = model.PackageVersionRequirement.parse("^0.2.0") catch unreachable, // needs 0.2.x
+        .source_path = "../libA",
+    }};
+    const manifest = model.PackageManifest{
+        .schema = 1,
+        .package = .{
+            .name = "req_test",
+            .id = model.PackageId.parse("diamond.req_test") catch unreachable,
+            .version = model.Version.parse("0.1.0") catch unreachable,
+            .backend = .zig,
+        },
+        .options = &.{},
+        .deps = &deps,
+        .targets = &.{},
+    };
+
+    // libA @ 0.1.0.0 does not satisfy ^0.2.0.
+    var resolver = Resolver.init(allocator, .linux, .x86_64, .linux, .x86_64, &.{}, "examples/diamond/libC", io);
+    defer resolver.deinit();
+    try std.testing.expectError(error.UnsatisfiedRequirement, resolver.resolveRoot(manifest));
+
+    // ...reported with the normalized requirement and the resolved version.
+    const msg = captured.written();
+    try std.testing.expect(std.mem.indexOf(u8, msg, "requires >=0.2.0, <0.3.0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "resolves to 0.1.0.0") != null);
+
+    // The same graph with a satisfiable requirement resolves cleanly.
+    deps[0].require = model.PackageVersionRequirement.parse("^0.1.0") catch unreachable;
+    var resolver2 = Resolver.init(allocator, .linux, .x86_64, .linux, .x86_64, &.{}, "examples/diamond/libC", io);
+    defer resolver2.deinit();
+    _ = try resolver2.resolveRoot(manifest);
+}

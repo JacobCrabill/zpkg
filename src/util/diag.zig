@@ -22,40 +22,69 @@ pub fn resolveAbsPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 
 // --- Low-level writers: single source of truth for CLI stdout/stderr. ---------
 
-fn emit(file: std.Io.File, io: std.Io, text: []const u8) !void {
-    var buf: [4096]u8 = undefined;
-    var wf: std.Io.File.Writer = .init(file, io, &buf);
-    const w = &wf.interface;
+/// Overridable stderr sink. Diagnostics normally go to the real stderr (fd 2),
+/// but writing to fd 2 inside a unit test corrupts the Zig test runner's
+/// `--listen` IPC. Tests point this at a discarding or capturing writer via
+/// `setStderrOverride`. null = real stderr.
+///
+/// Not synchronized, and deliberately so: the real-output path uses a fresh stack
+/// buffer per call (so concurrent diagnostics never share mutable state), and this
+/// override is only ever set from single-threaded test setup. Don't repurpose it
+/// as a shared sink for concurrent production output.
+var stderr_override: ?*std.Io.Writer = null;
+
+/// Redirect diagnostic (stderr) output to `w`; pass null to restore the real
+/// stderr. Intended for tests (e.g. a `Discarding` or capturing writer).
+pub fn setStderrOverride(w: ?*std.Io.Writer) void {
+    stderr_override = w;
+}
+
+fn rawTo(w: *std.Io.Writer, text: []const u8) !void {
     try w.writeAll(text);
     try w.flush();
 }
 
-fn emitFmt(file: std.Io.File, io: std.Io, comptime fmt: []const u8, args: anytype) !void {
-    var buf: [4096]u8 = undefined;
-    var wf: std.Io.File.Writer = .init(file, io, &buf);
-    const w = &wf.interface;
+fn fmtTo(w: *std.Io.Writer, comptime fmt: []const u8, args: anytype) !void {
     try w.print(fmt, args);
+    try w.flush();
+}
+
+/// `prefix` + formatted message, with a trailing newline appended if missing.
+fn labeledTo(w: *std.Io.Writer, prefix: []const u8, comptime fmt: []const u8, args: anytype) !void {
+    try w.writeAll(prefix);
+    try w.print(fmt, args);
+    if (fmt.len == 0 or fmt[fmt.len - 1] != '\n') try w.writeAll("\n");
     try w.flush();
 }
 
 /// Write raw text to stdout and flush.
 pub fn writeStdout(io: std.Io, text: []const u8) !void {
-    try emit(.stdout(), io, text);
+    var buf: [4096]u8 = undefined;
+    var wf: std.Io.File.Writer = .init(.stdout(), io, &buf);
+    try rawTo(&wf.interface, text);
 }
 
 /// Write formatted text to stdout and flush.
 pub fn writeStdoutFmt(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
-    try emitFmt(.stdout(), io, fmt, args);
+    var buf: [4096]u8 = undefined;
+    var wf: std.Io.File.Writer = .init(.stdout(), io, &buf);
+    try fmtTo(&wf.interface, fmt, args);
 }
 
 /// Write raw text to stderr and flush.
 pub fn writeStderr(io: std.Io, text: []const u8) !void {
-    try emit(.stderr(), io, text);
+    if (stderr_override) |w| return rawTo(w, text);
+    var buf: [4096]u8 = undefined;
+    var wf: std.Io.File.Writer = .init(.stderr(), io, &buf);
+    try rawTo(&wf.interface, text);
 }
 
 /// Write formatted text to stderr and flush.
 pub fn writeStderrFmt(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
-    try emitFmt(.stderr(), io, fmt, args);
+    if (stderr_override) |w| return fmtTo(w, fmt, args);
+    var buf: [4096]u8 = undefined;
+    var wf: std.Io.File.Writer = .init(.stderr(), io, &buf);
+    try fmtTo(&wf.interface, fmt, args);
 }
 
 /// Print a command's help text to stdout.
@@ -64,23 +93,17 @@ pub fn writeHelp(io: std.Io, help_text: []const u8) !void {
 }
 
 pub fn writeError(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    if (stderr_override) |w| return labeledTo(w, "error: ", fmt, args);
     var buf: [4096]u8 = undefined;
     var wf: std.Io.File.Writer = .init(.stderr(), io, &buf);
-    const w = &wf.interface;
-    try w.writeAll("error: ");
-    try w.print(fmt, args);
-    if (fmt.len == 0 or fmt[fmt.len - 1] != '\n') try w.writeAll("\n");
-    try w.flush();
+    try labeledTo(&wf.interface, "error: ", fmt, args);
 }
 
 pub fn writeHint(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    if (stderr_override) |w| return labeledTo(w, "hint: ", fmt, args);
     var buf: [4096]u8 = undefined;
     var wf: std.Io.File.Writer = .init(.stderr(), io, &buf);
-    const w = &wf.interface;
-    try w.writeAll("hint: ");
-    try w.print(fmt, args);
-    if (fmt.len == 0 or fmt[fmt.len - 1] != '\n') try w.writeAll("\n");
-    try w.flush();
+    try labeledTo(&wf.interface, "hint: ", fmt, args);
 }
 
 pub fn writeLockfileMissingError(io: std.Io) !void {
